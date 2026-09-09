@@ -24,33 +24,33 @@ jobs:
 
       - name: Configure Android for sing-box
         run: |
+          set -euo pipefail
+          mkdir -p android/app/libs
+          curl -fL --retry 5 --retry-all-errors \
+            "https://jitpack.io/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar" \
+            -o android/app/libs/libbox.aar
+          test -s android/app/libs/libbox.aar
+          unzip -t android/app/libs/libbox.aar >/dev/null
+
           python3 - <<'PY'
           from pathlib import Path
 
           settings = Path('android/settings.gradle.kts')
           text = settings.read_text()
-          jitpack = 'maven { url = uri("https://jitpack.io") }'
-
-          # JitPack must be in dependencyResolutionManagement.repositories.
-          # Adding it only to pluginManagement.repositories does not resolve
-          # com.github.singbox-android:libbox used by flutter_sing_box.
-          dep_marker = 'dependencyResolutionManagement {'
-          if jitpack not in text:
-              start = text.find(dep_marker)
-              if start < 0:
-                  raise SystemExit('dependencyResolutionManagement block not found')
-              repo_marker = 'repositories {'
-              repo = text.find(repo_marker, start)
-              if repo < 0:
-                  raise SystemExit('dependency repositories block not found')
-              insert_at = repo + len(repo_marker)
-              text = text[:insert_at] + '\n        ' + jitpack + text[insert_at:]
+          text = text.replace(
+              'pluginManagement {\n    repositories {',
+              'pluginManagement {\n    repositories {'
+          )
           settings.write_text(text)
 
           gradle = Path('android/app/build.gradle.kts')
           text = gradle.read_text()
-          if 'compileSdk = 37' not in text:
-              text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37')
+          text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37')
+          marker = 'dependencies {\n'
+          if marker not in text:
+              text += '\n\ndependencies {\n    implementation(files("libs/libbox.aar"))\n}\n'
+          elif 'implementation(files("libs/libbox.aar"))' not in text:
+              text = text.replace(marker, marker + '    implementation(files("libs/libbox.aar"))\n', 1)
           gradle.write_text(text)
           PY
 
