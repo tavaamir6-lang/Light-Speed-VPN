@@ -5,11 +5,15 @@ import 'services/subscription_service.dart';
 
 final FlutterSingBox singBox = FlutterSingBox();
 final SubscriptionService subscriptions = SubscriptionService();
-const String defaultSubscription = 'https://orginal.iranlightspeed.xyz:2096/sub/Amirali🎀';
+const defaultSubscription = 'https://orginal.iranlightspeed.xyz:2096/sub/Amirali🎀';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await singBox.init();
+  try {
+    await singBox.init();
+  } catch (e) {
+    debugPrint('sing-box init failed: $e');
+  }
   runApp(const LightSpeedApp());
 }
 
@@ -17,15 +21,11 @@ class LightSpeedApp extends StatelessWidget {
   const LightSpeedApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        debugShowCheckedModeBanner: false,
-        title: 'Light Speed VPN',
-        theme: ThemeData(
-          useMaterial3: true,
-          colorSchemeSeed: Colors.blue,
-          brightness: Brightness.dark,
-        ),
-        home: const HomePage(),
-      );
+    debugShowCheckedModeBanner: false,
+    title: 'Light Speed VPN',
+    theme: ThemeData(useMaterial3: true, brightness: Brightness.dark, colorSchemeSeed: Colors.blue),
+    home: const HomePage(),
+  );
 }
 
 class HomePage extends StatefulWidget {
@@ -35,285 +35,160 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final _url = TextEditingController(text: defaultSubscription);
-  final _name = TextEditingController(text: 'Light Speed');
+  final urlController = TextEditingController(text: defaultSubscription);
+  final nameController = TextEditingController(text: 'Light Speed');
+  StreamSubscription<ProxyState>? stateSubscription;
   List<Profile> profiles = [];
   Profile? selected;
   bool running = false;
-  bool loading = false;
-  String status = 'قطع';
-  String lastAction = 'آماده';
-  StreamSubscription<ProxyState>? _statusSub;
+  bool busy = false;
+  String message = 'آماده اتصال';
 
   @override
   void initState() {
     super.initState();
-    _loadProfiles();
-    _statusSub = singBox.proxyStateStream.listen((state) {
+    _reloadProfiles();
+    stateSubscription = singBox.proxyStateStream.listen((state) {
       if (!mounted) return;
       setState(() {
         running = state == ProxyState.started;
-        status = running ? 'متصل' : 'قطع';
+        message = running ? 'VPN متصل است' : 'VPN قطع است';
       });
     });
   }
 
-  void _loadProfiles() {
+  void _reloadProfiles() {
     profiles = ProfileStorage().getProfiles();
     selected = ProfileStorage().getSelectedProfile();
     if (mounted) setState(() {});
   }
 
-  Future<void> _addSubscription() async {
-    final raw = _url.text.trim();
+  Future<void> _import() async {
+    final raw = urlController.text.trim();
     final uri = Uri.tryParse(raw);
-    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
-      _message('لینک اشتراک معتبر نیست');
+    if (uri == null || uri.host.isEmpty || !uri.hasScheme) {
+      _snack('لینک اشتراک معتبر نیست');
       return;
     }
-    setState(() {
-      loading = true;
-      lastAction = 'در حال دریافت و تحلیل اشتراک...';
-    });
+    setState(() { busy = true; message = 'در حال دریافت اشتراک...'; });
     try {
       final profile = await subscriptions.importSubscription(
         url: raw,
-        name: _name.text.trim().isEmpty ? null : _name.text.trim(),
+        name: nameController.text.trim().isEmpty ? null : nameController.text.trim(),
       );
       ProfileStorage().setSelectedProfile(profile.id);
-      _loadProfiles();
-      _message('اشتراک با موفقیت دریافت و ذخیره شد');
-      if (mounted) setState(() => lastAction = 'اشتراک بروزرسانی شد');
+      _reloadProfiles();
+      _snack('اشتراک با موفقیت اضافه شد');
+      if (mounted) setState(() => message = 'اشتراک آماده اتصال است');
     } catch (e) {
-      _message('دریافت اشتراک ناموفق بود: $e');
-      if (mounted) setState(() => lastAction = 'خطا در دریافت اشتراک');
+      _snack('خطای دریافت اشتراک: $e');
+      if (mounted) setState(() => message = 'دریافت اشتراک ناموفق بود');
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) setState(() => busy = false);
     }
   }
 
-  Future<void> _toggleVpn() async {
+  Future<void> _toggle() async {
     if (selected == null) {
-      _message('ابتدا اشتراک را اضافه کنید');
+      _snack('ابتدا یک اشتراک اضافه و انتخاب کنید');
       return;
     }
+    setState(() => busy = true);
     try {
       if (running) {
         await singBox.stopVpn();
-        if (mounted) setState(() => lastAction = 'VPN متوقف شد');
+        if (mounted) setState(() => message = 'در حال قطع VPN...');
       } else {
         ProfileStorage().setSelectedProfile(selected!.id);
         await singBox.startVpn();
-        if (mounted) setState(() => lastAction = 'درخواست اتصال ارسال شد');
+        if (mounted) setState(() => message = 'درخواست اتصال ارسال شد');
       }
     } catch (e) {
-      _message('خطای اتصال VPN: $e');
-    }
-  }
-
-  Future<void> _testSelected() async {
-    if (selected == null) return;
-    try {
-      setState(() => loading = true);
-      await singBox.urlTest(groupTag: 'proxy');
-      _message('تست سرور انجام شد');
-      if (mounted) setState(() => lastAction = 'تست تأخیر انجام شد');
-    } catch (_) {
-      _message('تست تأخیر برای این اشتراک در دسترس نیست');
+      _snack('خطای VPN: $e');
+      if (mounted) setState(() => message = 'اتصال ناموفق بود');
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) setState(() => busy = false);
     }
   }
 
-  void _select(Profile profile) {
-    if (running) return;
-    ProfileStorage().setSelectedProfile(profile.id);
-    _loadProfiles();
+  Future<void> _test() async {
+    if (selected == null) return;
+    setState(() => busy = true);
+    try {
+      await singBox.urlTest(groupTag: 'proxy');
+      _snack('تست تأخیر انجام شد');
+    } catch (e) {
+      _snack('تست سرورها در این اشتراک در دسترس نیست');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
-  void _delete(Profile profile) {
+  void _select(Profile p) {
     if (running) return;
-    ProfileStorage().deleteProfile(profile.id);
-    _loadProfiles();
-    _message('اشتراک حذف شد');
+    ProfileStorage().setSelectedProfile(p.id);
+    _reloadProfiles();
   }
 
-  void _message(String text) {
+  void _delete(Profile p) {
+    if (running) return;
+    ProfileStorage().deleteProfile(p.id);
+    _reloadProfiles();
+  }
+
+  void _snack(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Light Speed VPN'),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            onPressed: loading ? null : _addSubscription,
-            icon: const Icon(Icons.sync_rounded),
-            tooltip: 'بروزرسانی اشتراک',
-          ),
-        ],
-      ),
-      body: RefreshIndicator(
-        onRefresh: _addSubscription,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
-          children: [
-            Card(
-              elevation: 2,
-              child: Padding(
-                padding: const EdgeInsets.all(22),
-                child: Column(
-                  children: [
-                    Container(
-                      width: 82,
-                      height: 82,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: running
-                            ? scheme.primaryContainer
-                            : scheme.surfaceContainerHighest,
-                      ),
-                      child: Icon(
-                        running ? Icons.shield_rounded : Icons.shield_outlined,
-                        size: 46,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(status, style: Theme.of(context).textTheme.headlineSmall),
-                    const SizedBox(height: 4),
-                    Text(lastAction, style: Theme.of(context).textTheme.bodySmall),
-                    const SizedBox(height: 18),
-                    SizedBox(
-                      width: 160,
-                      height: 160,
-                      child: FilledButton(
-                        onPressed: loading ? null : _toggleVpn,
-                        style: FilledButton.styleFrom(shape: const CircleBorder()),
-                        child: Icon(
-                          running ? Icons.stop_rounded : Icons.power_settings_new_rounded,
-                          size: 58,
-                        ),
-                      ),
-                    ),
-                    if (selected != null) ...[
-                      const SizedBox(height: 16),
-                      Text(selected!.name, style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 4),
-                      Text('${selected!.outboundsCount} سرور در اشتراک'),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text('اشتراک جدید', style: Theme.of(context).textTheme.titleLarge),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _name,
-                      decoration: const InputDecoration(
-                        labelText: 'نام اشتراک',
-                        prefixIcon: Icon(Icons.label_outline),
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _url,
-                      keyboardType: TextInputType.url,
-                      decoration: const InputDecoration(
-                        labelText: 'Subscription URL',
-                        prefixIcon: Icon(Icons.link_rounded),
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: loading ? null : _addSubscription,
-                            icon: const Icon(Icons.download_rounded),
-                            label: Text(loading ? 'در حال دریافت...' : 'افزودن / بروزرسانی'),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton.filledTonal(
-                          onPressed: selected == null || loading ? null : _testSelected,
-                          icon: const Icon(Icons.speed_rounded),
-                          tooltip: 'تست سرورها',
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(child: Text('اشتراک‌ها', style: Theme.of(context).textTheme.titleLarge)),
-                Chip(label: Text('${profiles.length} مورد')),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (profiles.isEmpty)
-              const Card(
-                child: Padding(
-                  padding: EdgeInsets.all(22),
-                  child: Center(child: Text('هنوز اشتراکی اضافه نشده است')),
-                ),
-              ),
-            ...profiles.map(
-              (p) => Card(
-                child: ListTile(
-                  leading: Radio<int>(
-                    value: p.id,
-                    groupValue: selected?.id,
-                    onChanged: running ? null : (v) { if (v != null) _select(p); },
-                  ),
-                  title: Text(p.name),
-                  subtitle: Text(
-                    '${p.outboundsCount} سرور\n${p.typed.subscribeUrl ?? ''}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  isThreeLine: true,
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline_rounded),
-                    onPressed: running ? null : () => _delete(p),
-                  ),
-                  onTap: () => _select(p),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'اشتراک هر ۲۴ ساعت به‌صورت خودکار برای دریافت کانفیگ‌های جدید بروزرسانی می‌شود.',
-              textAlign: TextAlign.center,
-            ),
+      appBar: AppBar(title: const Text('Light Speed VPN'), centerTitle: true,
+        actions: [IconButton(onPressed: busy ? null : _import, icon: const Icon(Icons.sync))]),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        Card(child: Padding(padding: const EdgeInsets.all(20), child: Column(children: [
+          Icon(running ? Icons.shield : Icons.shield_outlined, size: 64),
+          const SizedBox(height: 8),
+          Text(running ? 'متصل' : 'قطع', style: Theme.of(context).textTheme.headlineSmall),
+          Text(message),
+          const SizedBox(height: 18),
+          SizedBox(width: 160, height: 160, child: FilledButton(
+            onPressed: busy ? null : _toggle,
+            style: FilledButton.styleFrom(shape: const CircleBorder()),
+            child: Icon(running ? Icons.stop : Icons.power_settings_new, size: 58),
+          )),
+          if (selected != null) ...[
+            const SizedBox(height: 14), Text(selected!.name, style: Theme.of(context).textTheme.titleLarge),
+            Text('${selected!.outboundsCount} سرور'),
           ],
-        ),
-      ),
+        ]))),
+        const SizedBox(height: 14),
+        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [
+          TextField(controller: nameController, decoration: const InputDecoration(labelText: 'نام اشتراک', border: OutlineInputBorder())),
+          const SizedBox(height: 10),
+          TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(labelText: 'Subscription URL', border: OutlineInputBorder())),
+          const SizedBox(height: 10),
+          Row(children: [Expanded(child: FilledButton.icon(onPressed: busy ? null : _import, icon: const Icon(Icons.download), label: Text(busy ? 'لطفاً صبر کنید...' : 'افزودن / بروزرسانی'))), const SizedBox(width: 8), IconButton.filledTonal(onPressed: selected == null || busy ? null : _test, icon: const Icon(Icons.speed))]),
+        ]))),
+        const SizedBox(height: 16),
+        Text('اشتراک‌ها', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        if (profiles.isEmpty) const Card(child: Padding(padding: EdgeInsets.all(20), child: Text('اشتراکی ثبت نشده است'))),
+        ...profiles.map((p) => Card(child: ListTile(
+          leading: Radio<int>(value: p.id, groupValue: selected?.id, onChanged: running ? null : (_) => _select(p)),
+          title: Text(p.name), subtitle: Text('${p.outboundsCount} سرور\n${p.typed.subscribeUrl ?? ''}', maxLines: 2, overflow: TextOverflow.ellipsis), isThreeLine: true,
+          trailing: IconButton(onPressed: running ? null : () => _delete(p), icon: const Icon(Icons.delete_outline)), onTap: () => _select(p),
+        ))),
+      ]),
     );
   }
 
   @override
   void dispose() {
-    _statusSub?.cancel();
-    _url.dispose();
-    _name.dispose();
+    stateSubscription?.cancel();
+    urlController.dispose();
+    nameController.dispose();
     super.dispose();
   }
 }
