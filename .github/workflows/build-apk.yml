@@ -1,6 +1,9 @@
 name: Build Light Speed APK
 
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,20 +19,89 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.44.0
+          flutter-version: '3.44.0'
           channel: stable
           cache: true
 
-      - name: Create Android project files
-        run: flutter create --platforms=android --org com.lightspeed.vpn .
+      - name: Generate Android host project
+        run: flutter create --platforms=android --org com.lightspeed .
 
-      - name: Prepare libbox
+      - name: Configure Android for flutter_sing_box
         shell: bash
         run: |
           set -euo pipefail
+          cat > android/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              val flutterSdkPath = run {
+                  val properties = java.util.Properties()
+                  file("local.properties").inputStream().use { properties.load(it) }
+                  properties.getProperty("flutter.sdk") ?: error("flutter.sdk not set")
+              }
+              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          plugins {
+              id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.1.20" apply false
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url = uri("$rootDir/local-maven") }
+                  maven("https://storage.googleapis.com/download.flutter.io")
+              }
+          }
+
+          rootProject.name = "light_speed_vpn"
+          include(":app")
+          EOF
+
+          cat > android/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("dev.flutter.flutter-gradle-plugin")
+          }
+
+          android {
+              namespace = "com.lightspeed.vpn"
+              compileSdk = 37
+
+              defaultConfig {
+                  applicationId = "com.lightspeed.vpn"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions { jvmTarget = "17" }
+
+              buildTypes {
+                  release { signingConfig = signingConfigs.getByName("debug") }
+              }
+          }
+
+          flutter { source = "../.." }
+          EOF
+
           mkdir -p android/local-maven/com/github/singbox-android/libbox/1.14.0
           curl -fL --retry 5 --retry-all-errors \
-            https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar \
+            'https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar' \
             -o android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           unzip -t android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar >/dev/null
@@ -44,38 +116,18 @@ jobs:
           </project>
           EOF
 
-      - name: Configure Android repositories
-        shell: python
-        run: |
-          from pathlib import Path
-
-          settings = Path('android/settings.gradle.kts')
-          text = settings.read_text()
-          marker = 'maven { url = uri("$rootDir/local-maven") }'
-          if marker not in text:
-              needle = 'repositories {\n'
-              if needle not in text:
-                  raise SystemExit('repositories block not found in settings.gradle.kts')
-              text = text.replace(needle, needle + '        ' + marker + '\n', 1)
-          settings.write_text(text)
-
-          app = Path('android/app/build.gradle.kts')
-          text = app.read_text()
-          text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37')
-          text = text.replace('minSdk = flutter.minSdkVersion', 'minSdk = 26')
-          app.write_text(text)
-
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Analyze
+      - name: Analyze Dart
         run: flutter analyze lib --no-fatal-infos
 
-      - name: Build APK
+      - name: Build release APK
         run: flutter build apk --release --verbose
 
       - name: Verify APK
         run: |
+          set -euo pipefail
           test -s build/app/outputs/flutter-apk/app-release.apk
           ls -lh build/app/outputs/flutter-apk/app-release.apk
 
