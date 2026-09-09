@@ -12,76 +12,11 @@ jobs:
   build:
     name: Build Light speed APK
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout Light speed
+      - name: Checkout
         uses: actions/checkout@v4
-
-      # Build from one known-good Hiddify source tree.
-      # IMPORTANT: clone without submodules first, then rewrite the
-      # upstream SSH submodule URL to HTTPS before initializing it.
-      - name: Checkout Hiddify source
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/hiddify
-          git clone --depth 1 --no-recurse-submodules https://github.com/hiddify/hiddify-app.git /tmp/hiddify
-          cd /tmp/hiddify
-
-          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule sync --recursive
-          git -c protocol.version=2 submodule update --init --recursive --depth 1
-
-          cd - >/dev/null
-          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          rsync -a --exclude='.git' /tmp/hiddify/ ./
-
-      - name: Apply Light speed branding
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          replacements = {
-              'lib/core/model/constants.dart': [
-                  ('static const appName = "Hiddify";', 'static const appName = "Light speed 🔥";')
-              ],
-              'android/app/src/main/AndroidManifest.xml': [
-                  ('android:label="Hiddify"', 'android:label="Light speed 🔥"')
-              ],
-              'lib/core/theme/app_theme.dart': [
-                  ('const Color(0xFF293CA0)', 'const Color(0xFF7C4DFF)')
-              ],
-          }
-
-          for filename, pairs in replacements.items():
-              p = Path(filename)
-              if not p.exists():
-                  raise SystemExit(f'Missing expected Hiddify file: {filename}')
-              text = p.read_text(encoding='utf-8')
-              for old, new in pairs:
-                  if old not in text:
-                      raise SystemExit(f'Branding target not found: {filename}: {old}')
-                  text = text.replace(old, new)
-              p.write_text(text, encoding='utf-8')
-
-          p = Path('pubspec.yaml')
-          text = p.read_text(encoding='utf-8')
-          text = text.replace('name: hiddify', 'name: light_speed_vpn', 1)
-          text = text.replace(
-              'description: Cross Platform Multi Protocol Proxy Frontend.',
-              'description: Light speed VPN client based on the Hiddify open-source project.',
-              1,
-          )
-          text = text.replace('version: 4.1.2+40102', 'version: 1.0.0+1', 1)
-          p.write_text(text, encoding='utf-8')
-          PY
-
-          test -f LICENSE.md
-          echo '--- Final source alignment ---'
-          grep -E '^(name:|description:|version:)' pubspec.yaml
-          grep -R 'static const appName' -n lib/core/model/constants.dart
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -92,24 +27,35 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.38.5'
+          flutter-version: '3.24.5'
           channel: stable
           cache: true
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Prepare Android dependencies
+      - name: Complete Flutter Android project files
+        run: flutter create . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
+
+      - name: Verify project
         run: |
           set -euo pipefail
-          make android-apk-install-deps
-          make android-apk-prepare
+          grep -E '^(name:|version:)' pubspec.yaml
+          test -f lib/main.dart
+          test -f android/app/build.gradle
+          test -f android/gradlew
 
-      - name: Build Android APK
-        env:
-          CHANNEL: dev
-          IS_GITHUB_ACTIONS: '1'
-        run: make android-apk-release
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build APK
+        run: flutter build apk --release
 
       - name: Verify APK
         run: |
