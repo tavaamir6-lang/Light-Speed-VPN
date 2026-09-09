@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_sing_box/flutter_sing_box.dart';
+import 'services/subscription_service.dart';
 
 final FlutterSingBox singBox = FlutterSingBox();
+final SubscriptionService subscriptions = SubscriptionService();
 const String defaultSubscription = 'https://orginal.iranlightspeed.xyz:2096/sub/Amirali🎀';
 
 Future<void> main() async {
@@ -71,13 +73,12 @@ class _HomePageState extends State<HomePage> {
     }
     setState(() {
       loading = true;
-      lastAction = 'در حال دریافت اشتراک...';
+      lastAction = 'در حال دریافت و تحلیل اشتراک...';
     });
     try {
-      final profile = await ProfileService().importProfile(
-        subscribeLink: uri,
+      final profile = await subscriptions.importSubscription(
+        url: raw,
         name: _name.text.trim().isEmpty ? null : _name.text.trim(),
-        autoUpdateInterval: 24 * 60 * 60,
       );
       ProfileStorage().setSelectedProfile(profile.id);
       _loadProfiles();
@@ -184,32 +185,25 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    Text(status,
-                        style: Theme.of(context).textTheme.headlineSmall),
+                    Text(status, style: Theme.of(context).textTheme.headlineSmall),
                     const SizedBox(height: 4),
-                    Text(lastAction,
-                        style: Theme.of(context).textTheme.bodySmall),
+                    Text(lastAction, style: Theme.of(context).textTheme.bodySmall),
                     const SizedBox(height: 18),
                     SizedBox(
                       width: 160,
                       height: 160,
                       child: FilledButton(
                         onPressed: loading ? null : _toggleVpn,
-                        style: FilledButton.styleFrom(
-                          shape: const CircleBorder(),
-                        ),
+                        style: FilledButton.styleFrom(shape: const CircleBorder()),
                         child: Icon(
-                          running
-                              ? Icons.stop_rounded
-                              : Icons.power_settings_new_rounded,
+                          running ? Icons.stop_rounded : Icons.power_settings_new_rounded,
                           size: 58,
                         ),
                       ),
                     ),
                     if (selected != null) ...[
                       const SizedBox(height: 16),
-                      Text(selected!.name,
-                          style: Theme.of(context).textTheme.titleMedium),
+                      Text(selected!.name, style: Theme.of(context).textTheme.titleMedium),
                       const SizedBox(height: 4),
                       Text('${selected!.outboundsCount} سرور در اشتراک'),
                     ],
@@ -224,8 +218,7 @@ class _HomePageState extends State<HomePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text('اشتراک جدید',
-                        style: Theme.of(context).textTheme.titleLarge),
+                    Text('اشتراک جدید', style: Theme.of(context).textTheme.titleLarge),
                     const SizedBox(height: 12),
                     TextField(
                       controller: _name,
@@ -252,15 +245,12 @@ class _HomePageState extends State<HomePage> {
                           child: FilledButton.icon(
                             onPressed: loading ? null : _addSubscription,
                             icon: const Icon(Icons.download_rounded),
-                            label: Text(loading
-                                ? 'در حال دریافت...'
-                                : 'افزودن / بروزرسانی'),
+                            label: Text(loading ? 'در حال دریافت...' : 'افزودن / بروزرسانی'),
                           ),
                         ),
                         const SizedBox(width: 8),
                         IconButton.filledTonal(
-                          onPressed:
-                              selected == null || loading ? null : _testSelected,
+                          onPressed: selected == null || loading ? null : _testSelected,
                           icon: const Icon(Icons.speed_rounded),
                           tooltip: 'تست سرورها',
                         ),
@@ -273,10 +263,7 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 18),
             Row(
               children: [
-                Expanded(
-                  child: Text('اشتراک‌ها',
-                      style: Theme.of(context).textTheme.titleLarge),
-                ),
+                Expanded(child: Text('اشتراک‌ها', style: Theme.of(context).textTheme.titleLarge)),
                 Chip(label: Text('${profiles.length} مورد')),
               ],
             ),
@@ -294,11 +281,7 @@ class _HomePageState extends State<HomePage> {
                   leading: Radio<int>(
                     value: p.id,
                     groupValue: selected?.id,
-                    onChanged: running
-                        ? null
-                        : (v) {
-                            if (v != null) _select(p);
-                          },
+                    onChanged: running ? null : (v) { if (v != null) _select(p); },
                   ),
                   title: Text(p.name),
                   subtitle: Text(
