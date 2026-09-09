@@ -1,4 +1,4 @@
-name: Build Light speed APK
+name: Build Light speed 🔥 APK
 
 on:
   push:
@@ -10,34 +10,88 @@ permissions:
 
 jobs:
   build:
-    name: Android release APK
+    name: Build Light speed from Hiddify open-source base
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+
     steps:
-      - name: Checkout
+      - name: Checkout Light speed
         uses: actions/checkout@v4
+
+      - name: Checkout Hiddify source
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/hiddify
+          git clone --depth 1 --recurse-submodules https://github.com/hiddify/hiddify-app.git /tmp/hiddify
+          rm -rf ./* ./.??* 2>/dev/null || true
+          rsync -a --exclude='.git' /tmp/hiddify/ ./
+
+      - name: Apply Light speed branding
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              'lib/core/model/constants.dart': [('static const appName = "Hiddify";', 'static const appName = "Light speed 🔥";')],
+              'android/app/src/main/AndroidManifest.xml': [('android:label="Hiddify"', 'android:label="Light speed 🔥"')],
+              'lib/core/theme/app_theme.dart': [
+                  ('const Color(0xFF293CA0)', 'const Color(0xFF7C4DFF)'),
+              ],
+          }
+
+          for filename, pairs in replacements.items():
+              p = Path(filename)
+              text = p.read_text(encoding='utf-8')
+              for old, new in pairs:
+                  if old not in text:
+                      raise SystemExit(f'Branding target not found: {filename}: {old}')
+                  text = text.replace(old, new)
+              p.write_text(text, encoding='utf-8')
+          PY
+
+          # Keep the upstream GPL license and attribution intact.
+          sed -i 's/^name: hiddify$/name: light_speed_vpn/' pubspec.yaml
+          sed -i 's/^description: Cross Platform Multi Protocol Proxy Frontend\.$/description: Light speed VPN client based on the Hiddify open-source project./' pubspec.yaml
+          sed -i 's/^version: .*/version: 1.0.0+1/' pubspec.yaml
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.0'
+          flutter-version: '3.38.5'
           channel: stable
           cache: true
-      - name: Generate clean Android host
-        run: flutter create --platforms=android --org com.lightspeed --project-name light_speed_vpn .
-      - name: Get dependencies
-        run: flutter pub get
-      - name: Analyze Dart
-        run: flutter analyze --no-fatal-infos
-      - name: Build release APK
-        run: flutter build apk --release
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Prepare Android dependencies
+        run: |
+          set -euo pipefail
+          make android-apk-install-deps
+          make android-apk-prepare
+
+      - name: Build Android APK
+        env:
+          CHANNEL: dev
+          IS_GITHUB_ACTIONS: '1'
+        run: make android-apk-release
+
       - name: Verify APK
         run: |
           set -euo pipefail
-          test -s build/app/outputs/flutter-apk/app-release.apk
-          ls -lh build/app/outputs/flutter-apk/app-release.apk
+          find build/app/outputs -type f -name '*.apk' -print
+          test -n "$(find build/app/outputs -type f -name '*.apk' -print -quit)"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: light-speed-vpn-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/**/*.apk
           if-no-files-found: error
