@@ -22,6 +22,29 @@ jobs:
       - name: Generate Android project
         run: flutter create --platforms=android --org com.lightspeed.vpn .
 
+      - name: Configure Android for sing-box
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          settings = Path('android/settings.gradle.kts')
+          text = settings.read_text()
+          marker = 'repositories {'
+          if marker in text and 'https://jitpack.io' not in text:
+              text = text.replace(
+                  marker,
+                  marker + '\n        maven { url = uri("https://jitpack.io") }',
+                  1,
+              )
+          settings.write_text(text)
+
+          gradle = Path('android/app/build.gradle.kts')
+          text = gradle.read_text()
+          if 'compileSdk = 37' not in text:
+              text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37')
+          gradle.write_text(text)
+          PY
+
       - name: Get packages
         run: flutter pub get
 
