@@ -18,25 +18,23 @@ jobs:
       - name: Checkout Light speed
         uses: actions/checkout@v4
 
-      # Build from one known-good Hiddify source tree. The previous workflow
-      # mixed Hiddify with an unused V2Box dependency, which made the files
-      # and native build requirements inconsistent.
+      # Build from one known-good Hiddify source tree.
+      # IMPORTANT: clone without submodules first, then rewrite the
+      # upstream SSH submodule URL to HTTPS before initializing it.
       - name: Checkout Hiddify source
         run: |
           set -euo pipefail
           rm -rf /tmp/hiddify
-          git clone --depth 1 https://github.com/hiddify/hiddify-app.git /tmp/hiddify
+          git clone --depth 1 --no-recurse-submodules https://github.com/hiddify/hiddify-app.git /tmp/hiddify
           cd /tmp/hiddify
 
-          # Upstream currently declares hiddify-core with an SSH URL.
-          # Force every GitHub SSH URL to HTTPS so Actions needs no SSH key.
           git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule sync --recursive
           git -c protocol.version=2 submodule update --init --recursive --depth 1
 
           cd - >/dev/null
-          rm -rf ./* ./.??* 2>/dev/null || true
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
           rsync -a --exclude='.git' /tmp/hiddify/ ./
 
       - name: Apply Light speed branding
