@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:flutter_sing_box/flutter_sing_box.dart';
 import 'package:http/http.dart' as http;
 
@@ -11,126 +12,92 @@ class SubscriptionInfo {
   const SubscriptionInfo({this.upload, this.download, this.total, this.expire});
 
   int? get used => upload == null || download == null ? null : upload! + download!;
+  int? get remaining => total == null || used == null ? null : (total! - used!).clamp(0, total!);
 
-  factory SubscriptionInfo.fromHeader(String? value) {
-    if (value == null || value.trim().isEmpty) return const SubscriptionInfo();
-    final map = <String, int>{};
-    for (final part in value.split(';').map((e) => e.trim())) {
-      final i = part.indexOf('=');
+  factory SubscriptionInfo.fromHeaders(Map<String, String> headers) {
+    final raw = headers['subscription-userinfo'] ?? headers['subscription-user-info'];
+    if (raw == null || raw.trim().isEmpty) return const SubscriptionInfo();
+    final values = <String, int>{};
+    for (final part in raw.split(';')) {
+      final p = part.trim();
+      final i = p.indexOf('=');
       if (i <= 0) continue;
-      final key = part.substring(0, i).trim().toLowerCase();
-      final number = int.tryParse(part.substring(i + 1).trim());
-      if (number != null) map[key] = number;
+      final value = int.tryParse(p.substring(i + 1).trim());
+      if (value != null) values[p.substring(0, i).trim().toLowerCase()] = value;
     }
     return SubscriptionInfo(
-      upload: map['upload'],
-      download: map['download'],
-      total: map['total'],
-      expire: map['expire'],
+      upload: values['upload'],
+      download: values['download'],
+      total: values['total'],
+      expire: values['expire'],
     );
   }
 }
 
 class SubscriptionResult {
   final String sourceUrl;
-  final String body;
-  final List<String> links;
+  final List<String> nodes;
   final SubscriptionInfo info;
   final String format;
-  final Map<String, dynamic>? json;
 
   const SubscriptionResult({
     required this.sourceUrl,
-    required this.body,
-    required this.links,
+    required this.nodes,
     required this.info,
     required this.format,
-    this.json,
   });
-
-  int get nodeCount => links.length;
 }
 
 class SubscriptionService {
   final ProfileService _profiles = ProfileService();
 
   Future<Profile> importSubscription({required String url, String? name}) async {
-    final uri = Uri.tryParse(url.trim());
-    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
-      throw const FormatException('Invalid subscription URL');
-    }
-
-    // Let flutter_sing_box handle the complete subscription natively.
-    // This preserves UUID/password, TLS, Reality, WS/gRPC, DNS, routes,
-    // proxy groups and all other fields instead of rebuilding lossy URLs.
+    final uri = _validUri(url);
     return _profiles.importProfile(
       subscribeLink: uri,
-      name: name?.trim().isEmpty == true ? null : name?.trim(),
+      name: name == null || name.trim().isEmpty ? null : name.trim(),
       autoUpdateInterval: 86400,
     );
   }
 
   Future<SubscriptionResult> fetch(String url) async {
-    final uri = Uri.tryParse(url.trim());
-    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
-      throw const FormatException('Invalid subscription URL');
-    }
-
+    final uri = _validUri(url);
     final response = await http.get(uri, headers: const {
-      'Accept': 'text/plain, text/yaml, application/json, application/yaml, */*',
-      'User-Agent': 'Light-Speed-VPN/1.0',
+      'Accept': '*/*',
+      'Cache-Control': 'no-cache',
+      'User-Agent': 'LightSpeed/1.0',
     }).timeout(const Duration(seconds: 25));
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw FormatException('Subscription HTTP ${response.statusCode}');
+      throw FormatException('HTTP ${response.statusCode}');
     }
 
-    final body = utf8.decode(response.bodyBytes, allowMalformed: true)
+    final text = utf8.decode(response.bodyBytes, allowMalformed: true)
         .replaceFirst('\uFEFF', '')
         .trim();
-    if (body.isEmpty) throw const FormatException('Subscription is empty');
+    if (text.isEmpty) throw const FormatException('Subscription is empty');
 
-    final info = SubscriptionInfo.fromHeader(
-      response.headers['subscription-userinfo'] ??
-          response.headers['subscription-user-info'],
-    );
-    final parsed = parse(body);
+    final parsed = parse(text);
     return SubscriptionResult(
       sourceUrl: url,
-      body: parsed.body,
-      links: parsed.links,
-      info: info,
+      nodes: parsed.nodes,
+      info: SubscriptionInfo.fromHeaders(response.headers),
       format: parsed.format,
-      json: parsed.json,
     );
   }
 
-  static SubscriptionResult parse(String input) {
-    var body = input.replaceFirst('\uFEFF', '').trim();
-    if (body.isEmpty) throw const FormatException('Subscription is empty');
-
-    final direct = _extractLinks(body);
-    if (direct.isNotEmpty) {
-      return SubscriptionResult(
-        sourceUrl: '',
-        body: body,
-        links: direct,
-        info: const SubscriptionInfo(),
-        format: 'uri-list',
-      );
+  static SubscriptionResult parse(String text) {
+    var body = text.replaceFirst('\uFEFF', '').trim();
+    var nodes = _extractLinks(body);
+    if (nodes.isNotEmpty) {
+      return SubscriptionResult(sourceUrl: '', nodes: nodes, info: const SubscriptionInfo(), format: 'URI list');
     }
 
-    final decoded = _tryBase64(body);
-    if (decoded != null && decoded.trim() != body) {
-      final links = _extractLinks(decoded);
-      if (links.isNotEmpty) {
-        return SubscriptionResult(
-          sourceUrl: '',
-          body: decoded,
-          links: links,
-          info: const SubscriptionInfo(),
-          format: 'base64',
-        );
+    final decoded = _decodeBase64(body);
+    if (decoded != null && decoded != body) {
+      nodes = _extractLinks(decoded);
+      if (nodes.isNotEmpty) {
+        return SubscriptionResult(sourceUrl: '', nodes: nodes, info: const SubscriptionInfo(), format: 'Base64');
       }
       body = decoded.trim();
     }
@@ -138,83 +105,66 @@ class SubscriptionService {
     try {
       final value = jsonDecode(body);
       if (value is Map<String, dynamic>) {
-        // Never flatten JSON outbounds into fake scheme://host:port URLs.
-        // That would silently discard authentication and transport settings.
-        final format = value.containsKey('outbounds')
-            ? 'sing-box-json'
-            : value.containsKey('proxies')
-                ? 'clash-json'
-                : 'json';
         return SubscriptionResult(
           sourceUrl: '',
-          body: body,
-          links: const <String>[],
+          nodes: _linksFromJson(value),
           info: const SubscriptionInfo(),
-          format: format,
-          json: value,
+          format: 'JSON',
         );
       }
-    } catch (_) {
-      // YAML or URI lists are handled below.
-    }
+    } catch (_) {}
 
-    final yamlLinks = _extractLinks(body);
     return SubscriptionResult(
       sourceUrl: '',
-      body: body,
-      links: yamlLinks,
+      nodes: _extractLinks(body),
       info: const SubscriptionInfo(),
-      format: yamlLinks.isNotEmpty ? 'uri-list' : 'raw',
+      format: 'Raw',
     );
   }
 
-  static String? _tryBase64(String value) {
+  static Uri _validUri(String value) {
+    final uri = Uri.tryParse(value.trim());
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      throw const FormatException('Invalid subscription URL');
+    }
+    return uri;
+  }
+
+  static String? _decodeBase64(String value) {
     final compact = value.replaceAll(RegExp(r'\s+'), '');
     if (compact.length < 8) return null;
     try {
-      return utf8.decode(
-        base64.decode(base64.normalize(compact)),
-        allowMalformed: false,
-      );
+      return utf8.decode(base64.decode(base64.normalize(compact)));
     } catch (_) {
       return null;
     }
   }
 
   static List<String> _extractLinks(String body) {
+    const schemes = {
+      'vless', 'vmess', 'trojan', 'ss', 'ssr', 'hysteria', 'hysteria2',
+      'hy2', 'tuic', 'wireguard', 'wg', 'socks', 'http', 'https', 'ssh',
+    };
     final result = <String>[];
     final seen = <String>{};
     for (final raw in body.split(RegExp(r'\r?\n'))) {
       final line = raw.trim();
-      if (line.isEmpty || line.startsWith('#')) continue;
-      final match = RegExp(
-        r'^([A-Za-z][A-Za-z0-9+.-]*):\/\/',
-        caseSensitive: false,
-      ).firstMatch(line);
+      final match = RegExp(r'^([A-Za-z][A-Za-z0-9+.-]*):\/\/', caseSensitive: false).firstMatch(line);
       if (match == null) continue;
-      final scheme = match.group(1)!.toLowerCase();
-      if (!_schemes.contains(scheme)) continue;
+      if (!schemes.contains(match.group(1)!.toLowerCase())) continue;
       if (seen.add(line)) result.add(line);
     }
     return result;
   }
 
-  static const _schemes = <String>{
-    'vless',
-    'vmess',
-    'trojan',
-    'ss',
-    'hysteria',
-    'hysteria2',
-    'hy2',
-    'tuic',
-    'wireguard',
-    'wg',
-    'socks',
-    'http',
-    'https',
-    'ssh',
-  };
-
-  static List<String> decodeText(String body) => parse(body).links;
+  static List<String> _linksFromJson(Map<String, dynamic> json) {
+    final outbounds = json['outbounds'];
+    if (outbounds is! List) return const [];
+    return outbounds.whereType<Map>().map((o) {
+      final tag = o['tag'];
+      final type = o['type'];
+      if (tag == null || type == null) return null;
+      return '$type — $tag';
+    }).whereType<String>().toList();
+  }
 }
