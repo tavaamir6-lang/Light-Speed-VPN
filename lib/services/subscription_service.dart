@@ -14,9 +14,8 @@ class SubscriptionInfo {
 
   factory SubscriptionInfo.fromHeader(String? value) {
     if (value == null || value.trim().isEmpty) return const SubscriptionInfo();
-    final parts = value.split(';').map((e) => e.trim());
     final map = <String, int>{};
-    for (final part in parts) {
+    for (final part in value.split(';').map((e) => e.trim())) {
       final i = part.indexOf('=');
       if (i <= 0) continue;
       final key = part.substring(0, i).trim().toLowerCase();
@@ -55,31 +54,15 @@ class SubscriptionResult {
 class SubscriptionService {
   final ProfileService _profiles = ProfileService();
 
-  static const _schemes = <String>{
-    'vless',
-    'vmess',
-    'trojan',
-    'ss',
-    'hysteria',
-    'hysteria2',
-    'hy2',
-    'tuic',
-    'wireguard',
-    'wg',
-    'socks',
-    'http',
-    'https',
-    'ssh',
-  };
-
-  Future<Profile> importSubscription({
-    required String url,
-    String? name,
-  }) async {
-    final uri = Uri.parse(url.trim());
-    if (!uri.hasScheme || (uri.host.isEmpty && !uri.scheme.startsWith('vless'))) {
+  Future<Profile> importSubscription({required String url, String? name}) async {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
       throw const FormatException('Invalid subscription URL');
     }
+
+    // Let flutter_sing_box handle the complete subscription natively.
+    // This preserves UUID/password, TLS, Reality, WS/gRPC, DNS, routes,
+    // proxy groups and all other fields instead of rebuilding lossy URLs.
     return _profiles.importProfile(
       subscribeLink: uri,
       name: name?.trim().isEmpty == true ? null : name?.trim(),
@@ -88,8 +71,8 @@ class SubscriptionService {
   }
 
   Future<SubscriptionResult> fetch(String url) async {
-    final uri = Uri.parse(url.trim());
-    if (!uri.hasScheme || uri.host.isEmpty) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
       throw const FormatException('Invalid subscription URL');
     }
 
@@ -102,11 +85,14 @@ class SubscriptionService {
       throw FormatException('Subscription HTTP ${response.statusCode}');
     }
 
-    final body = utf8.decode(response.bodyBytes, allowMalformed: true).replaceFirst('\uFEFF', '').trim();
+    final body = utf8.decode(response.bodyBytes, allowMalformed: true)
+        .replaceFirst('\uFEFF', '')
+        .trim();
     if (body.isEmpty) throw const FormatException('Subscription is empty');
 
     final info = SubscriptionInfo.fromHeader(
-      response.headers['subscription-userinfo'] ?? response.headers['subscription-user-info'],
+      response.headers['subscription-userinfo'] ??
+          response.headers['subscription-user-info'],
     );
     final parsed = parse(body);
     return SubscriptionResult(
@@ -126,8 +112,11 @@ class SubscriptionService {
     final direct = _extractLinks(body);
     if (direct.isNotEmpty) {
       return SubscriptionResult(
-        sourceUrl: '', body: body, links: direct,
-        info: const SubscriptionInfo(), format: 'uri-list',
+        sourceUrl: '',
+        body: body,
+        links: direct,
+        info: const SubscriptionInfo(),
+        format: 'uri-list',
       );
     }
 
@@ -136,8 +125,11 @@ class SubscriptionService {
       final links = _extractLinks(decoded);
       if (links.isNotEmpty) {
         return SubscriptionResult(
-          sourceUrl: '', body: decoded, links: links,
-          info: const SubscriptionInfo(), format: 'base64',
+          sourceUrl: '',
+          body: decoded,
+          links: links,
+          info: const SubscriptionInfo(),
+          format: 'base64',
         );
       }
       body = decoded.trim();
@@ -146,24 +138,31 @@ class SubscriptionService {
     try {
       final value = jsonDecode(body);
       if (value is Map<String, dynamic>) {
-        final links = _linksFromJson(value);
+        // Never flatten JSON outbounds into fake scheme://host:port URLs.
+        // That would silently discard authentication and transport settings.
         final format = value.containsKey('outbounds')
-            ? 'sing-box/xray-json'
+            ? 'sing-box-json'
             : value.containsKey('proxies')
                 ? 'clash-json'
                 : 'json';
         return SubscriptionResult(
-          sourceUrl: '', body: body, links: links,
-          info: const SubscriptionInfo(), format: format, json: value,
+          sourceUrl: '',
+          body: body,
+          links: const <String>[],
+          info: const SubscriptionInfo(),
+          format: format,
+          json: value,
         );
       }
     } catch (_) {
-      // YAML and URI lists are handled below.
+      // YAML or URI lists are handled below.
     }
 
     final yamlLinks = _extractLinks(body);
     return SubscriptionResult(
-      sourceUrl: '', body: body, links: yamlLinks,
+      sourceUrl: '',
+      body: body,
+      links: yamlLinks,
       info: const SubscriptionInfo(),
       format: yamlLinks.isNotEmpty ? 'uri-list' : 'raw',
     );
@@ -173,7 +172,10 @@ class SubscriptionService {
     final compact = value.replaceAll(RegExp(r'\s+'), '');
     if (compact.length < 8) return null;
     try {
-      return utf8.decode(base64.decode(base64.normalize(compact)), allowMalformed: false);
+      return utf8.decode(
+        base64.decode(base64.normalize(compact)),
+        allowMalformed: false,
+      );
     } catch (_) {
       return null;
     }
@@ -183,10 +185,12 @@ class SubscriptionService {
     final result = <String>[];
     final seen = <String>{};
     for (final raw in body.split(RegExp(r'\r?\n'))) {
-      var line = raw.trim();
+      final line = raw.trim();
       if (line.isEmpty || line.startsWith('#')) continue;
-      if (line.startsWith('proxies:') || line.startsWith('outbounds:')) continue;
-      final match = RegExp(r'^([A-Za-z][A-Za-z0-9+.-]*):\\/\\/', caseSensitive: false).firstMatch(line);
+      final match = RegExp(
+        r'^([A-Za-z][A-Za-z0-9+.-]*):\/\/',
+        caseSensitive: false,
+      ).firstMatch(line);
       if (match == null) continue;
       final scheme = match.group(1)!.toLowerCase();
       if (!_schemes.contains(scheme)) continue;
@@ -195,32 +199,22 @@ class SubscriptionService {
     return result;
   }
 
-  static List<String> _linksFromJson(Map<String, dynamic> root) {
-    final result = <String>[];
-    final outbounds = root['outbounds'];
-    if (outbounds is List) {
-      for (final item in outbounds) {
-        if (item is! Map) continue;
-        final type = '${item['type'] ?? ''}'.toLowerCase();
-        final server = item['server']?.toString();
-        final port = item['server_port']?.toString();
-        if (type.isEmpty || server == null || port == null) continue;
-        result.add('$type://$server:$port#${Uri.encodeComponent('${item['tag'] ?? type}')}');
-      }
-    }
-    final proxies = root['proxies'];
-    if (proxies is List) {
-      for (final item in proxies) {
-        if (item is! Map) continue;
-        final type = '${item['type'] ?? ''}'.toLowerCase();
-        final server = item['server']?.toString();
-        final port = item['port']?.toString();
-        if (type.isEmpty || server == null || port == null) continue;
-        result.add('$type://$server:$port#${Uri.encodeComponent('${item['name'] ?? type}')}');
-      }
-    }
-    return result;
-  }
+  static const _schemes = <String>{
+    'vless',
+    'vmess',
+    'trojan',
+    'ss',
+    'hysteria',
+    'hysteria2',
+    'hy2',
+    'tuic',
+    'wireguard',
+    'wg',
+    'socks',
+    'http',
+    'https',
+    'ssh',
+  };
 
   static List<String> decodeText(String body) => parse(body).links;
 }
