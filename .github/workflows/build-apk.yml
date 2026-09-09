@@ -34,38 +34,44 @@ jobs:
           unzip -t android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar >/dev/null
 
           cat > android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>com.github.singbox-android</groupId>
-            <artifactId>libbox</artifactId>
-            <version>1.14.0</version>
-            <packaging>aar</packaging>
-          </project>
-          EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.github.singbox-android</groupId>
+  <artifactId>libbox</artifactId>
+  <version>1.14.0</version>
+  <packaging>aar</packaging>
+</project>
+EOF
 
           python3 - <<'PY'
           from pathlib import Path
 
           settings = Path('android/settings.gradle.kts')
           text = settings.read_text()
-          local_repo = '        maven { url = uri("$rootDir/local-maven") }'
+          repo_line = '        maven { url = uri("$rootDir/local-maven") }'
 
           if 'dependencyResolutionManagement {' in text:
               start = text.index('dependencyResolutionManagement {')
               repo_pos = text.find('repositories {', start)
               if repo_pos < 0:
                   raise SystemExit('dependencyResolutionManagement exists but repositories block is missing')
-              if local_repo not in text:
+              if 'uri("$rootDir/local-maven")' not in text:
                   insert_at = repo_pos + len('repositories {')
-                  text = text[:insert_at] + '\n' + local_repo + text[insert_at:]
+                  text = text[:insert_at] + '\n' + repo_line + text[insert_at:]
           else:
-              block = '''\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)\n    repositories {\n        maven { url = uri("$rootDir/local-maven") }\n        google()\n        mavenCentral()\n        maven("https://storage.googleapis.com/download.flutter.io")\n    }\n}\n'''
-              anchor = '\nplugins {'
-              if anchor not in text:
-                  raise SystemExit('plugins block not found in generated settings.gradle.kts')
-              text = text.replace(anchor, block + anchor, 1)
+              block = '''
+
+dependencyResolutionManagement {
+    repositories {
+        maven { url = uri("$rootDir/local-maven") }
+        google()
+        mavenCentral()
+        maven("https://storage.googleapis.com/download.flutter.io")
+    }
+}
+'''
+              text += block
 
           settings.write_text(text)
 
@@ -78,9 +84,12 @@ jobs:
       - name: Verify Gradle configuration
         run: |
           set -euo pipefail
-          grep -n "dependencyResolutionManagement\|local-maven\|RepositoriesMode" android/settings.gradle.kts
-          test -f android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
-          test -f android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom
+          echo '--- settings.gradle.kts ---'
+          cat android/settings.gradle.kts
+          echo '--- libbox files ---'
+          ls -lh android/local-maven/com/github/singbox-android/libbox/1.14.0/
+          test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
+          test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom
 
       - name: Get packages
         run: flutter pub get
