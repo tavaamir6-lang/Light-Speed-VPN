@@ -1,4 +1,4 @@
-name: Build Light Speed APK
+name: Build Light speed APK
 
 on:
   push:
@@ -10,127 +10,31 @@ permissions:
 
 jobs:
   build:
+    name: Android release APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.44.0'
           channel: stable
           cache: true
-
-      - name: Generate Android host project
-        run: flutter create --platforms=android --org com.lightspeed .
-
-      - name: Configure Android for flutter_sing_box
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > android/settings.gradle.kts <<'EOF'
-          pluginManagement {
-              val flutterSdkPath = run {
-                  val properties = java.util.Properties()
-                  file("local.properties").inputStream().use { properties.load(it) }
-                  properties.getProperty("flutter.sdk") ?: error("flutter.sdk not set")
-              }
-              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-
-          plugins {
-              id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-              id("com.android.application") version "8.7.3" apply false
-              id("org.jetbrains.kotlin.android") version "2.1.20" apply false
-          }
-
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-              repositories {
-                  google()
-                  mavenCentral()
-                  maven { url = uri("$rootDir/local-maven") }
-                  maven("https://storage.googleapis.com/download.flutter.io")
-              }
-          }
-
-          rootProject.name = "light_speed_vpn"
-          include(":app")
-          EOF
-
-          cat > android/app/build.gradle.kts <<'EOF'
-          plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-              id("dev.flutter.flutter-gradle-plugin")
-          }
-
-          android {
-              namespace = "com.lightspeed.vpn"
-              compileSdk = 37
-
-              defaultConfig {
-                  applicationId = "com.lightspeed.vpn"
-                  minSdk = 26
-                  targetSdk = 35
-                  versionCode = 1
-                  versionName = "1.0.0"
-              }
-
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-
-              kotlinOptions { jvmTarget = "17" }
-
-              buildTypes {
-                  release { signingConfig = signingConfigs.getByName("debug") }
-              }
-          }
-
-          flutter { source = "../.." }
-          EOF
-
-          mkdir -p android/local-maven/com/github/singbox-android/libbox/1.14.0
-          curl -fL --retry 5 --retry-all-errors \
-            'https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar' \
-            -o android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
-          test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
-          unzip -t android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar >/dev/null
-          cat > android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <project xmlns="http://maven.apache.org/POM/4.0.0">
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>com.github.singbox-android</groupId>
-            <artifactId>libbox</artifactId>
-            <version>1.14.0</version>
-            <packaging>aar</packaging>
-          </project>
-          EOF
-
+      - name: Generate clean Android host
+        run: flutter create --platforms=android --org com.lightspeed --project-name light_speed_vpn .
       - name: Get dependencies
         run: flutter pub get
-
       - name: Analyze Dart
-        run: flutter analyze lib --no-fatal-infos
-
+        run: flutter analyze --no-fatal-infos
       - name: Build release APK
-        run: flutter build apk --release --verbose
-
+        run: flutter build apk --release
       - name: Verify APK
         run: |
           set -euo pipefail
           test -s build/app/outputs/flutter-apk/app-release.apk
           ls -lh build/app/outputs/flutter-apk/app-release.apk
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
