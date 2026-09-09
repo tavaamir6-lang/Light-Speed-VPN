@@ -290,13 +290,19 @@ class _HomePageState extends State<HomePage> {
 
   Widget _serverCard(int index, ServerConfig server) {
     final fastest = index == 1 && server.ping != null;
+    final hashIndex = server.raw.indexOf('#');
+    final name = hashIndex >= 0 && hashIndex + 1 < server.raw.length
+        ? Uri.decodeComponent(server.raw.substring(hashIndex + 1))
+        : server.type.toUpperCase();
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
         leading: CircleAvatar(child: Text('$index')),
-        title: Text(server.raw.split('#').last.replaceAll(RegExp(r'^[^#]*#'), '').trim().isEmpty ? server.type.toUpperCase() : server.raw.split('#').last), maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('${server.type.toUpperCase()} • ${server.address}:${server.port}'),
-        trailing: fastest ? Text('⚡ ${server.ping} ms', style: const TextStyle(fontWeight: FontWeight.bold)) : Text(server.ping == null ? '—' : '${server.ping} ms'),
+        title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text('${server.type.toUpperCase()} • ${server.address}:${server.port}', maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: fastest
+            ? Text('⚡ ${server.ping} ms', style: const TextStyle(fontWeight: FontWeight.bold))
+            : Text(server.ping == null ? '—' : '${server.ping} ms'),
       ),
     );
   }
