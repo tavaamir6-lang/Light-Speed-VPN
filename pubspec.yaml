@@ -1,0 +1,17 @@
+name: light_speed_vpn
+description: Light Speed VPN - subscription based Android client powered by sing-box.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.12.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_sing_box: ^1.1.5
+  http: ^1.5.0
+  shared_preferences: ^2.5.3
+
+flutter:
+  uses-material-design: true
