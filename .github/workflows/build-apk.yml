@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   build:
-    name: Build Light speed from Hiddify open-source base
+    name: Build Light speed hybrid (Hiddify + V2Box)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout Light speed
@@ -22,30 +22,31 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf /tmp/hiddify
-
-          # Hiddify declares some submodules with SSH URLs. The GitHub Actions
-          # runner has no SSH key, so transparently rewrite GitHub SSH URLs to HTTPS.
-          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-
-          git clone --depth 1 --recurse-submodules https://github.com/hiddify/hiddify-app.git /tmp/hiddify
-          git -C /tmp/hiddify submodule sync --recursive
-          git -C /tmp/hiddify submodule update --init --recursive
-
+          git clone --depth 1 https://github.com/hiddify/hiddify-app.git /tmp/hiddify
+          cd /tmp/hiddify
+          # Hiddify declares hiddify-core through SSH. The GitHub runner has no SSH key,
+          # so force the submodule URL to HTTPS before initializing it.
+          git config submodule.hiddify-core.url https://github.com/hiddify/hiddify-core.git
+          git -c protocol.version=2 submodule update --init --depth 1 hiddify-core
+          cd - >/dev/null
           rm -rf ./* ./.??* 2>/dev/null || true
           rsync -a --exclude='.git' /tmp/hiddify/ ./
 
-      - name: Apply Light speed branding
+      - name: Apply Light speed branding and hybrid dependency
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
           replacements = {
-              'lib/core/model/constants.dart': [('static const appName = "Hiddify";', 'static const appName = "Light speed 🔥";')],
-              'android/app/src/main/AndroidManifest.xml': [('android:label="Hiddify"', 'android:label="Light speed 🔥"')],
+              'lib/core/model/constants.dart': [
+                  ('static const appName = "Hiddify";', 'static const appName = "Light speed 🔥";')
+              ],
+              'android/app/src/main/AndroidManifest.xml': [
+                  ('android:label="Hiddify"', 'android:label="Light speed 🔥"')
+              ],
               'lib/core/theme/app_theme.dart': [
-                  ('const Color(0xFF293CA0)', 'const Color(0xFF7C4DFF)'),
+                  ('const Color(0xFF293CA0)', 'const Color(0xFF7C4DFF)')
               ],
           }
 
@@ -57,18 +58,36 @@ jobs:
                       raise SystemExit(f'Branding target not found: {filename}: {old}')
                   text = text.replace(old, new)
               p.write_text(text, encoding='utf-8')
+
+          p = Path('pubspec.yaml')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('name: hiddify', 'name: light_speed_vpn', 1)
+          text = text.replace('description: Cross Platform Multi Protocol Proxy Frontend.',
+                              'description: Light speed VPN client based on Hiddify with V2Box dual-core integration.', 1)
+          text = text.replace('version: 4.1.2+40102', 'version: 1.0.0+1', 1)
+          marker = '\n\ndev_dependencies:'
+          dep = '''\n  # V2Box provides the secondary Xray/sing-box engine layer.\n  v2ray_box:\n    git:\n      url: https://github.com/imanheidary/v2box.git\n      ref: main\n'''
+          if 'v2ray_box:' not in text:
+              if marker not in text:
+                  raise SystemExit('Could not locate dev_dependencies marker in pubspec.yaml')
+              text = text.replace(marker, dep + marker, 1)
+          p.write_text(text, encoding='utf-8')
           PY
 
-          # Keep the upstream GPL license and attribution intact.
-          sed -i 's/^name: hiddify$/name: light_speed_vpn/' pubspec.yaml
-          sed -i 's/^description: Cross Platform Multi Protocol Proxy Frontend\.$/description: Light speed VPN client based on the Hiddify open-source project./' pubspec.yaml
-          sed -i 's/^version: .*/version: 1.0.0+1/' pubspec.yaml
+          # Keep upstream GPL license and attribution intact.
+          test -f LICENSE.md
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -79,6 +98,15 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Prepare V2Box Xray engine
+        run: |
+          set -euo pipefail
+          mkdir -p scripts
+          curl -fsSL https://raw.githubusercontent.com/imanheidary/v2box/main/example/scripts/build_android_libxray.sh -o scripts/build_android_libxray.sh
+          chmod +x scripts/build_android_libxray.sh
+          ./scripts/build_android_libxray.sh --project-root "$GITHUB_WORKSPACE" --android-abis arm64-v8a,x86_64
+          test -s android/app/libs/libxray.aar
 
       - name: Prepare Android dependencies
         run: |
