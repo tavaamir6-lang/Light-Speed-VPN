@@ -28,7 +28,7 @@ jobs:
           mkdir -p android/local-maven/com/github/singbox-android/libbox/1.14.0
 
           curl -fL --retry 5 --retry-all-errors \
-            "https://jitpack.io/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar" \
+            "https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar" \
             -o android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           unzip -t android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar >/dev/null
@@ -50,18 +50,23 @@ jobs:
 
           settings = Path('android/settings.gradle.kts')
           text = settings.read_text()
-          marker = 'dependencyResolutionManagement {'
-          if marker not in text:
-              raise SystemExit('dependencyResolutionManagement block not found')
-          start = text.index(marker)
-          repo_marker = 'repositories {'
-          repo = text.find(repo_marker, start)
-          if repo < 0:
-              raise SystemExit('dependency repositories block not found')
           local_repo = '        maven { url = uri("$rootDir/local-maven") }'
-          if local_repo not in text:
-              insert_at = repo + len(repo_marker)
-              text = text[:insert_at] + '\n' + local_repo + text[insert_at:]
+
+          if 'dependencyResolutionManagement {' in text:
+              start = text.index('dependencyResolutionManagement {')
+              repo_pos = text.find('repositories {', start)
+              if repo_pos < 0:
+                  raise SystemExit('dependencyResolutionManagement exists but repositories block is missing')
+              if local_repo not in text:
+                  insert_at = repo_pos + len('repositories {')
+                  text = text[:insert_at] + '\n' + local_repo + text[insert_at:]
+          else:
+              block = '''\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)\n    repositories {\n        maven { url = uri("$rootDir/local-maven") }\n        google()\n        mavenCentral()\n        maven("https://storage.googleapis.com/download.flutter.io")\n    }\n}\n'''
+              anchor = '\nplugins {'
+              if anchor not in text:
+                  raise SystemExit('plugins block not found in generated settings.gradle.kts')
+              text = text.replace(anchor, block + anchor, 1)
+
           settings.write_text(text)
 
           gradle = Path('android/app/build.gradle.kts')
@@ -69,6 +74,13 @@ jobs:
           text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37')
           gradle.write_text(text)
           PY
+
+      - name: Verify Gradle configuration
+        run: |
+          set -euo pipefail
+          grep -n "dependencyResolutionManagement\|local-maven\|RepositoriesMode" android/settings.gradle.kts
+          test -f android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
+          test -f android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom
 
       - name: Get packages
         run: flutter pub get
