@@ -29,13 +29,22 @@ jobs:
 
           settings = Path('android/settings.gradle.kts')
           text = settings.read_text()
-          marker = 'repositories {'
-          if marker in text and 'https://jitpack.io' not in text:
-              text = text.replace(
-                  marker,
-                  marker + '\n        maven { url = uri("https://jitpack.io") }',
-                  1,
-              )
+          jitpack = 'maven { url = uri("https://jitpack.io") }'
+
+          # JitPack must be in dependencyResolutionManagement.repositories.
+          # Adding it only to pluginManagement.repositories does not resolve
+          # com.github.singbox-android:libbox used by flutter_sing_box.
+          dep_marker = 'dependencyResolutionManagement {'
+          if jitpack not in text:
+              start = text.find(dep_marker)
+              if start < 0:
+                  raise SystemExit('dependencyResolutionManagement block not found')
+              repo_marker = 'repositories {'
+              repo = text.find(repo_marker, start)
+              if repo < 0:
+                  raise SystemExit('dependency repositories block not found')
+              insert_at = repo + len(repo_marker)
+              text = text[:insert_at] + '\n        ' + jitpack + text[insert_at:]
           settings.write_text(text)
 
           gradle = Path('android/app/build.gradle.kts')
