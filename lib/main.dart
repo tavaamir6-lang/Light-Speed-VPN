@@ -34,7 +34,12 @@ class ServerConfig {
   final int port;
   int? ping;
 
-  ServerConfig({required this.raw, required this.type, required this.address, required this.port});
+  ServerConfig({
+    required this.raw,
+    required this.type,
+    required this.address,
+    required this.port,
+  });
 }
 
 class SubscriptionInfo {
@@ -43,7 +48,12 @@ class SubscriptionInfo {
   final int total;
   final int expire;
 
-  const SubscriptionInfo({this.upload = 0, this.download = 0, this.total = 0, this.expire = 0});
+  const SubscriptionInfo({
+    this.upload = 0,
+    this.download = 0,
+    this.total = 0,
+    this.expire = 0,
+  });
 
   int get used => upload + download;
   int get remaining => total > used ? total - used : 0;
@@ -83,7 +93,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> loadSubscription() async {
     final url = urlController.text.trim();
     if (url.isEmpty) {
-      setState(() => status = 'لینک Subscription را وارد کن');
+      if (mounted) setState(() => status = 'لینک Subscription را وارد کن');
       return;
     }
     setState(() {
@@ -91,11 +101,14 @@ class _HomePageState extends State<HomePage> {
       status = 'در حال دریافت Subscription...';
     });
     try {
-      final response = await http.get(Uri.parse(url), headers: {
-        'User-Agent': 'LightSpeed/1.0',
-        'Accept': '*/*',
-        'Cache-Control': 'no-cache',
-      }).timeout(const Duration(seconds: 20));
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'User-Agent': 'LightSpeed/1.0',
+          'Accept': '*/*',
+          'Cache-Control': 'no-cache',
+        },
+      ).timeout(const Duration(seconds: 20));
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException('HTTP ${response.statusCode}');
@@ -142,11 +155,13 @@ class _HomePageState extends State<HomePage> {
 
   String _decodeSubscription(String input) {
     final direct = input.trim();
-    if (RegExp(r'(?m)^(vless|vmess|trojan|ss|ssr|hysteria2?|hy2|hy|tuic|wireguard)://').hasMatch(direct)) {
-      return direct;
-    }
+    final schemePattern = RegExp(
+      r'(?m)^(vless|vmess|trojan|ss|ssr|hysteria2?|hy2|hy|tuic|wireguard)://',
+    );
+    if (schemePattern.hasMatch(direct)) return direct;
+
     String current = direct;
-    for (int i = 0; i < 3; i++) {
+    for (var i = 0; i < 3; i++) {
       try {
         var normalized = current.replaceAll('-', '+').replaceAll('_', '/');
         normalized += '=' * ((4 - normalized.length % 4) % 4);
@@ -163,18 +178,36 @@ class _HomePageState extends State<HomePage> {
 
   List<ServerConfig> _parseConfigs(String text) {
     final result = <ServerConfig>[];
+    const supported = {
+      'vless',
+      'vmess',
+      'trojan',
+      'ss',
+      'ssr',
+      'hysteria',
+      'hysteria2',
+      'hy2',
+      'hy',
+      'tuic',
+      'wireguard',
+    };
+
     for (final raw in text.split(RegExp(r'[\r\n]+'))) {
       final line = raw.trim();
-      if (line.isEmpty) continue;
+      if (line.isEmpty || !line.contains('://')) continue;
       final uri = Uri.tryParse(line);
-      if (uri == null || !line.contains('://')) continue;
+      if (uri == null) continue;
       final type = uri.scheme.toLowerCase();
-      const supported = {'vless', 'vmess', 'trojan', 'ss', 'ssr', 'hysteria', 'hysteria2', 'hy2', 'hy', 'tuic', 'wireguard'};
       if (!supported.contains(type)) continue;
       final port = uri.hasPort ? uri.port : 443;
       final host = uri.host.isNotEmpty ? uri.host : _hostFromRaw(line);
       if (host.isEmpty) continue;
-      result.add(ServerConfig(raw: line, type: type, address: host, port: port));
+      result.add(ServerConfig(
+        raw: line,
+        type: type,
+        address: host,
+        port: port,
+      ));
     }
     return result;
   }
@@ -195,7 +228,11 @@ class _HomePageState extends State<HomePage> {
     await Future.wait(configs.map((server) async {
       final watch = Stopwatch()..start();
       try {
-        final socket = await Socket.connect(server.address, server.port, timeout: const Duration(seconds: 3));
+        final socket = await Socket.connect(
+          server.address,
+          server.port,
+          timeout: const Duration(seconds: 3),
+        );
         await socket.close();
         server.ping = watch.elapsedMilliseconds;
       } catch (_) {
@@ -210,7 +247,7 @@ class _HomePageState extends State<HomePage> {
   String _bytes(int bytes) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     double n = bytes.toDouble();
-    int i = 0;
+    var i = 0;
     while (n >= 1024 && i < units.length - 1) {
       n /= 1024;
       i++;
@@ -220,15 +257,25 @@ class _HomePageState extends State<HomePage> {
 
   String _expire(int timestamp) {
     if (timestamp <= 0) return 'نامشخص';
-    return DateFormat('yyyy/MM/dd').format(DateTime.fromMillisecondsSinceEpoch(timestamp * 1000));
+    return DateFormat('yyyy/MM/dd').format(
+      DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Light speed 🔥', style: TextStyle(fontWeight: FontWeight.bold)),
-        actions: [IconButton(onPressed: loading ? null : loadSubscription, icon: const Icon(Icons.refresh))],
+        title: const Text(
+          'Light speed 🔥',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            onPressed: loading ? null : loadSubscription,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: loadSubscription,
@@ -242,8 +289,13 @@ class _HomePageState extends State<HomePage> {
                 labelText: 'Subscription URL',
                 hintText: 'https://...',
                 prefixIcon: const Icon(Icons.link),
-                suffixIcon: IconButton(icon: const Icon(Icons.download), onPressed: loading ? null : loadSubscription),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.download),
+                  onPressed: loading ? null : loadSubscription,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
               ),
             ),
             const SizedBox(height: 12),
@@ -256,13 +308,26 @@ class _HomePageState extends State<HomePage> {
             if (configs.isNotEmpty)
               Row(
                 children: [
-                  const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'سرورها',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
                   const Spacer(),
-                  if (testing) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-                  IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
+                  if (testing)
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  IconButton(
+                    onPressed: testing ? null : testPings,
+                    icon: const Icon(Icons.speed),
+                  ),
                 ],
               ),
-            ...configs.asMap().entries.map((entry) => _serverCard(entry.key + 1, entry.value)),
+            ...configs.asMap().entries.map(
+              (entry) => _serverCard(entry.key + 1, entry.value),
+            ),
           ],
         ),
       ),
@@ -273,17 +338,27 @@ class _HomePageState extends State<HomePage> {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(18),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
-          const SizedBox(height: 12),
-          Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
-          Text('آپلود: ${_bytes(info.upload)}'),
-          Text('دانلود: ${_bytes(info.download)}'),
-          Text('باقی‌مانده: ${_bytes(info.remaining)}'),
-          Text('انقضا: ${_expire(info.expire)}'),
-        ]),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '📊 اطلاعات اشتراک',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: info.progress,
+              minHeight: 8,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            const SizedBox(height: 12),
+            Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
+            Text('آپلود: ${_bytes(info.upload)}'),
+            Text('دانلود: ${_bytes(info.download)}'),
+            Text('باقی‌مانده: ${_bytes(info.remaining)}'),
+            Text('انقضا: ${_expire(info.expire)}'),
+          ],
+        ),
       ),
     );
   }
@@ -294,14 +369,26 @@ class _HomePageState extends State<HomePage> {
     final name = hashIndex >= 0 && hashIndex + 1 < server.raw.length
         ? Uri.decodeComponent(server.raw.substring(hashIndex + 1))
         : server.type.toUpperCase();
+
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
         leading: CircleAvatar(child: Text('$index')),
-        title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('${server.type.toUpperCase()} • ${server.address}:${server.port}', maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: Text(
+          name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          '${server.type.toUpperCase()} • ${server.address}:${server.port}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         trailing: fastest
-            ? Text('⚡ ${server.ping} ms', style: const TextStyle(fontWeight: FontWeight.bold))
+            ? Text(
+                '⚡ ${server.ping} ms',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              )
             : Text(server.ping == null ? '—' : '${server.ping} ms'),
       ),
     );
