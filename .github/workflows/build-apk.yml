@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Light speed hybrid (Hiddify + V2Box)
+    name: Build Light speed APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -18,21 +18,28 @@ jobs:
       - name: Checkout Light speed
         uses: actions/checkout@v4
 
+      # Build from one known-good Hiddify source tree. The previous workflow
+      # mixed Hiddify with an unused V2Box dependency, which made the files
+      # and native build requirements inconsistent.
       - name: Checkout Hiddify source
         run: |
           set -euo pipefail
           rm -rf /tmp/hiddify
           git clone --depth 1 https://github.com/hiddify/hiddify-app.git /tmp/hiddify
           cd /tmp/hiddify
-          # Hiddify declares hiddify-core through SSH. The GitHub runner has no SSH key,
-          # so force the submodule URL to HTTPS before initializing it.
-          git config submodule.hiddify-core.url https://github.com/hiddify/hiddify-core.git
-          git -c protocol.version=2 submodule update --init --depth 1 hiddify-core
+
+          # Upstream currently declares hiddify-core with an SSH URL.
+          # Force every GitHub SSH URL to HTTPS so Actions needs no SSH key.
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync --recursive
+          git -c protocol.version=2 submodule update --init --recursive --depth 1
+
           cd - >/dev/null
           rm -rf ./* ./.??* 2>/dev/null || true
           rsync -a --exclude='.git' /tmp/hiddify/ ./
 
-      - name: Apply Light speed branding and hybrid dependency
+      - name: Apply Light speed branding
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -52,6 +59,8 @@ jobs:
 
           for filename, pairs in replacements.items():
               p = Path(filename)
+              if not p.exists():
+                  raise SystemExit(f'Missing expected Hiddify file: {filename}')
               text = p.read_text(encoding='utf-8')
               for old, new in pairs:
                   if old not in text:
@@ -62,32 +71,25 @@ jobs:
           p = Path('pubspec.yaml')
           text = p.read_text(encoding='utf-8')
           text = text.replace('name: hiddify', 'name: light_speed_vpn', 1)
-          text = text.replace('description: Cross Platform Multi Protocol Proxy Frontend.',
-                              'description: Light speed VPN client based on Hiddify with V2Box dual-core integration.', 1)
+          text = text.replace(
+              'description: Cross Platform Multi Protocol Proxy Frontend.',
+              'description: Light speed VPN client based on the Hiddify open-source project.',
+              1,
+          )
           text = text.replace('version: 4.1.2+40102', 'version: 1.0.0+1', 1)
-          marker = '\n\ndev_dependencies:'
-          dep = '''\n  # V2Box provides the secondary Xray/sing-box engine layer.\n  v2ray_box:\n    git:\n      url: https://github.com/imanheidary/v2box.git\n      ref: main\n'''
-          if 'v2ray_box:' not in text:
-              if marker not in text:
-                  raise SystemExit('Could not locate dev_dependencies marker in pubspec.yaml')
-              text = text.replace(marker, dep + marker, 1)
           p.write_text(text, encoding='utf-8')
           PY
 
-          # Keep upstream GPL license and attribution intact.
           test -f LICENSE.md
+          echo '--- Final source alignment ---'
+          grep -E '^(name:|description:|version:)' pubspec.yaml
+          grep -R 'static const appName' -n lib/core/model/constants.dart
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: '17'
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.x'
-          cache: false
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -98,15 +100,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Prepare V2Box Xray engine
-        run: |
-          set -euo pipefail
-          mkdir -p scripts
-          curl -fsSL https://raw.githubusercontent.com/imanheidary/v2box/main/example/scripts/build_android_libxray.sh -o scripts/build_android_libxray.sh
-          chmod +x scripts/build_android_libxray.sh
-          ./scripts/build_android_libxray.sh --project-root "$GITHUB_WORKSPACE" --android-abis arm64-v8a,x86_64
-          test -s android/app/libs/libxray.aar
 
       - name: Prepare Android dependencies
         run: |
