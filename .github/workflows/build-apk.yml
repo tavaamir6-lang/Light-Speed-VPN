@@ -25,32 +25,48 @@ jobs:
       - name: Configure Android for sing-box
         run: |
           set -euo pipefail
-          mkdir -p android/app/libs
+          mkdir -p android/local-maven/com/github/singbox-android/libbox/1.14.0
+
           curl -fL --retry 5 --retry-all-errors \
             "https://jitpack.io/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar" \
-            -o android/app/libs/libbox.aar
-          test -s android/app/libs/libbox.aar
-          unzip -t android/app/libs/libbox.aar >/dev/null
+            -o android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
+          test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
+          unzip -t android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar >/dev/null
+
+          cat > android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.github.singbox-android</groupId>
+            <artifactId>libbox</artifactId>
+            <version>1.14.0</version>
+            <packaging>aar</packaging>
+          </project>
+          EOF
 
           python3 - <<'PY'
           from pathlib import Path
 
           settings = Path('android/settings.gradle.kts')
           text = settings.read_text()
-          text = text.replace(
-              'pluginManagement {\n    repositories {',
-              'pluginManagement {\n    repositories {'
-          )
+          marker = 'dependencyResolutionManagement {'
+          if marker not in text:
+              raise SystemExit('dependencyResolutionManagement block not found')
+          start = text.index(marker)
+          repo_marker = 'repositories {'
+          repo = text.find(repo_marker, start)
+          if repo < 0:
+              raise SystemExit('dependency repositories block not found')
+          local_repo = '        maven { url = uri("$rootDir/local-maven") }'
+          if local_repo not in text:
+              insert_at = repo + len(repo_marker)
+              text = text[:insert_at] + '\n' + local_repo + text[insert_at:]
           settings.write_text(text)
 
           gradle = Path('android/app/build.gradle.kts')
           text = gradle.read_text()
           text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37')
-          marker = 'dependencies {\n'
-          if marker not in text:
-              text += '\n\ndependencies {\n    implementation(files("libs/libbox.aar"))\n}\n'
-          elif 'implementation(files("libs/libbox.aar"))' not in text:
-              text = text.replace(marker, marker + '    implementation(files("libs/libbox.aar"))\n', 1)
           gradle.write_text(text)
           PY
 
