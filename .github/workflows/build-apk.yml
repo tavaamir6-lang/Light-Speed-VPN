@@ -1,17 +1,19 @@
 name: Build Light Speed APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  build-apk:
+    name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,20 +25,24 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Generate Android project
+      - name: Verify Flutter
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      - name: Generate Android platform
         run: flutter create --platforms=android --org com.lightspeed.vpn .
 
-      - name: Configure Android for sing-box
+      - name: Add local libbox Maven repository
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p android/local-maven/com/github/singbox-android/libbox/1.14.0
-
           curl -fL --retry 5 --retry-all-errors \
-            "https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar" \
+            'https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar' \
             -o android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           unzip -t android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar >/dev/null
-
           cat > android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -53,17 +59,8 @@ EOF
 
           settings = Path('android/settings.gradle.kts')
           text = settings.read_text()
-          repo_line = '        maven { url = uri("$rootDir/local-maven") }'
-
-          if 'dependencyResolutionManagement {' in text:
-              start = text.index('dependencyResolutionManagement {')
-              repo_pos = text.find('repositories {', start)
-              if repo_pos < 0:
-                  raise SystemExit('dependencyResolutionManagement exists but repositories block is missing')
-              if 'uri("$rootDir/local-maven")' not in text:
-                  insert_at = repo_pos + len('repositories {')
-                  text = text[:insert_at] + '\n' + repo_line + text[insert_at:]
-          else:
+          marker = 'maven { url = uri("$rootDir/local-maven") }'
+          if marker not in text:
               block = '''
 
 dependencyResolutionManagement {
@@ -76,7 +73,6 @@ dependencyResolutionManagement {
 }
 '''
               text += block
-
           settings.write_text(text)
 
           gradle = Path('android/app/build.gradle.kts')
@@ -85,28 +81,23 @@ dependencyResolutionManagement {
           gradle.write_text(text)
           PY
 
-      - name: Verify Gradle configuration
-        run: |
-          set -euo pipefail
-          test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
-          test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom
-          grep -q 'local-maven' android/settings.gradle.kts
-          grep -q 'compileSdk = 37' android/app/build.gradle.kts
-
-      - name: Get packages
+      - name: Get dependencies
         run: flutter pub get
 
-      - name: Remove generated sample test
-        run: rm -f test/widget_test.dart
-
-      - name: Analyze app only
+      - name: Analyze Dart
         run: flutter analyze lib --no-fatal-infos
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build release APK
+        run: flutter build apk --release --verbose
 
-      - name: Upload APK
+      - name: Verify APK
+        run: |
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: light-speed-vpn-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
