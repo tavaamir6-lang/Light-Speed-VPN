@@ -5,9 +5,13 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,12 +88,10 @@ dependencyResolutionManagement {
       - name: Verify Gradle configuration
         run: |
           set -euo pipefail
-          echo '--- settings.gradle.kts ---'
-          cat android/settings.gradle.kts
-          echo '--- libbox files ---'
-          ls -lh android/local-maven/com/github/singbox-android/libbox/1.14.0/
           test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.aar
           test -s android/local-maven/com/github/singbox-android/libbox/1.14.0/libbox-1.14.0.pom
+          grep -q 'local-maven' android/settings.gradle.kts
+          grep -q 'compileSdk = 37' android/app/build.gradle.kts
 
       - name: Get packages
         run: flutter pub get
