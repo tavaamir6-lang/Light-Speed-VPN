@@ -1,7 +1,7 @@
 name: light_speed_vpn
 description: "Light speed 🔥 independent multi-protocol VPN client."
 publish_to: 'none'
-version: 1.0.0+4
+version: 1.0.0+5
 
 environment:
   sdk: '>=3.13.0 <4.0.0'
@@ -11,7 +11,9 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: 1.0.8
-  flutter_sing_box: 1.2.0
+  # 1.1.5 is the stable line paired with sing-box/libbox 1.13.15.
+  # 1.2.0 moved the Android build to a newer Gradle/SDK matrix.
+  flutter_sing_box: 1.1.5
   mmkv: 2.4.2
   http: 1.6.0
   shared_preferences: 2.5.3
