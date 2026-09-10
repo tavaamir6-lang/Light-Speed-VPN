@@ -44,25 +44,51 @@ jobs:
           rm -rf android
           flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed --no-pub
 
-      - name: Configure Android repositories for sing-box
+      - name: Align Android toolchain for sing-box 1.13.15
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("android/settings.gradle.kts")
-          s = p.read_text()
-          block = '''\n\n// Light speed: repository required by flutter_sing_box/libbox.\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n'''
-          if 'dependencyResolutionManagement {' not in s:
-              s += block
-          elif 'https://jitpack.io' not in s:
+          import re
+
+          settings = Path('android/settings.gradle.kts')
+          s = settings.read_text()
+          # flutter_sing_box 1.1.5 was built/tested with AGP 8.13.2 + Kotlin 2.3.20.
+          s = re.sub(r'id\("com\.android\.application"\) version "[^"]+" apply false',
+                     'id("com.android.application") version "8.13.2" apply false', s)
+          s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
+                     'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
+          if 'https://jitpack.io' not in s:
               marker = 'dependencyResolutionManagement {'
-              start = s.index(marker)
-              repos = s.index('repositories {', start)
-              insert_at = s.index('\n', repos) + 1
-              s = s[:insert_at] + '        maven { url = uri("https://jitpack.io") }\n' + s[insert_at:]
-          p.write_text(s)
+              if marker in s:
+                  pos = s.index(marker)
+                  repo_pos = s.index('repositories {', pos) + len('repositories {')
+                  s = s[:repo_pos] + '\n        maven { url = uri("https://jitpack.io") }' + s[repo_pos:]
+              else:
+                  s += '\n\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n'
+          settings.write_text(s)
+
+          app = Path('android/app/build.gradle.kts')
+          a = app.read_text()
+          a = re.sub(r'compileSdk\s*=\s*[^\n]+', 'compileSdk = 36', a)
+          a = re.sub(r'minSdk\s*=\s*[^\n]+', 'minSdk = 26', a)
+          a = re.sub(r'targetSdk\s*=\s*[^\n]+', 'targetSdk = 36', a)
+          if 'JavaVersion.VERSION_17' not in a:
+              a = a.replace('    defaultConfig {', '    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }\n\n    kotlinOptions {\n        jvmTarget = JavaVersion.VERSION_17.toString()\n    }\n\n    defaultConfig {')
+          app.write_text(a)
+
+          wrapper = Path('android/gradle/wrapper/gradle-wrapper.properties')
+          w = wrapper.read_text()
+          w = re.sub(r'gradle-[0-9.]+-all\.zip', 'gradle-8.13-all.zip', w)
+          wrapper.write_text(w)
           PY
-          grep -n -A12 -B2 "dependencyResolutionManagement" android/settings.gradle.kts
+
+          echo '--- settings.gradle.kts ---'
+          grep -n -E 'com.android.application|kotlin.android|jitpack' android/settings.gradle.kts || true
+          echo '--- app/build.gradle.kts ---'
+          grep -n -E 'compileSdk|minSdk|targetSdk|VERSION_17' android/app/build.gradle.kts || true
+          echo '--- Gradle wrapper ---'
+          grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Get dependencies
         run: flutter pub get
@@ -92,4 +118,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-23
+# Build trigger marker: 2026-09-11-singbox-1.13.15
