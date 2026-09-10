@@ -44,11 +44,46 @@ jobs:
           rm -rf android
           flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
 
-      - name: Add JitPack repository for sing-box libbox
+      - name: Prepare pinned sing-box libbox 1.13.15
         run: |
           set -euo pipefail
-          sed -i '/mavenCentral()/a\        maven { url = uri("https://jitpack.io") }' android/settings.gradle.kts
-          grep -n "jitpack.io" android/settings.gradle.kts
+          VERSION="1.13.15"
+          REPO="android/local-maven/com/github/singbox-android/libbox/${VERSION}"
+          mkdir -p "$REPO"
+          curl -fL --retry 5 --retry-all-errors \
+            "https://jitpack.io/com/github/singbox-android/libbox/${VERSION}/libbox-${VERSION}.aar" \
+            -o "$REPO/libbox-${VERSION}.aar"
+          cat > "$REPO/libbox-${VERSION}.pom" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.github.singbox-android</groupId>
+            <artifactId>libbox</artifactId>
+            <version>1.13.15</version>
+            <packaging>aar</packaging>
+          </project>
+          EOF
+          ls -lh "$REPO"
+
+      - name: Add local Maven repository for libbox
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/settings.gradle.kts")
+          s = p.read_text()
+          marker = "dependencyResolutionManagement {"
+          if marker not in s:
+              raise SystemExit("dependencyResolutionManagement block not found")
+          start = s.index(marker)
+          repos = s.index("repositories {", start)
+          insert_at = s.index("\n", repos) + 1
+          s = s[:insert_at] + '        maven { url = uri("local-maven") }\n' + s[insert_at:]
+          p.write_text(s)
+          PY
+          grep -n -A8 "dependencyResolutionManagement" android/settings.gradle.kts
 
       - name: Get dependencies
         run: flutter pub get
@@ -77,4 +112,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-7
+# Build trigger marker: 2026-09-10-8
