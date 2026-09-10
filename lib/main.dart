@@ -3,11 +3,24 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_sing_box/flutter_sing_box.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:mmkv/mmkv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() => runApp(const LightSpeedApp());
+final FlutterSingBox vpn = FlutterSingBox();
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await MMKV.initialize();
+  try {
+    await vpn.init();
+  } catch (e) {
+    debugPrint('VPN core init failed: $e');
+  }
+  runApp(const LightSpeedApp());
+}
 
 class LightSpeedApp extends StatelessWidget {
   const LightSpeedApp({super.key});
@@ -34,7 +47,12 @@ class ServerConfig {
   final int port;
   int? ping;
 
-  ServerConfig({required this.raw, required this.type, required this.address, required this.port});
+  ServerConfig({
+    required this.raw,
+    required this.type,
+    required this.address,
+    required this.port,
+  });
 }
 
 class SubscriptionInfo {
@@ -43,7 +61,12 @@ class SubscriptionInfo {
   final int total;
   final int expire;
 
-  const SubscriptionInfo({this.upload = 0, this.download = 0, this.total = 0, this.expire = 0});
+  const SubscriptionInfo({
+    this.upload = 0,
+    this.download = 0,
+    this.total = 0,
+    this.expire = 0,
+  });
 
   int get used => upload + download;
   int get remaining => total > used ? total - used : 0;
@@ -63,12 +86,23 @@ class _HomePageState extends State<HomePage> {
   SubscriptionInfo? subscription;
   bool loading = false;
   bool testing = false;
+  bool connecting = false;
+  bool connected = false;
   String status = 'لینک Subscription را وارد کن';
+  String coreVersion = 'sing-box';
 
   @override
   void initState() {
     super.initState();
+    _loadCoreVersion();
     _restoreUrl();
+  }
+
+  Future<void> _loadCoreVersion() async {
+    try {
+      final version = await vpn.getSingBoxVersion();
+      if (mounted) setState(() => coreVersion = 'sing-box $version');
+    } catch (_) {}
   }
 
   Future<void> _restoreUrl() async {
@@ -86,12 +120,15 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => status = 'لینک Subscription را وارد کن');
       return;
     }
+
     setState(() {
       loading = true;
       status = 'در حال دریافت Subscription...';
     });
+
     try {
-      final response = await http.get(Uri.parse(url), headers: {
+      final uri = Uri.parse(url);
+      final response = await http.get(uri, headers: {
         'User-Agent': 'LightSpeed/1.0',
         'Accept': '*/*',
         'Cache-Control': 'no-cache',
@@ -103,11 +140,11 @@ class _HomePageState extends State<HomePage> {
 
       final info = _parseUserInfo(response.headers['subscription-userinfo']);
       final text = utf8.decode(response.bodyBytes, allowMalformed: true);
-      final decoded = _decodeSubscription(text);
-      final parsed = _parseConfigs(decoded);
+      final parsed = _parseConfigs(_decodeSubscription(text));
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('subscription_url', url);
+
       if (!mounted) return;
       setState(() {
         subscription = info;
@@ -115,7 +152,10 @@ class _HomePageState extends State<HomePage> {
         status = parsed.isEmpty ? 'کانفیگی پیدا نشد' : '${parsed.length} سرور پیدا شد';
         loading = false;
       });
-      if (parsed.isNotEmpty) await testPings();
+
+      if (parsed.isNotEmpty) {
+        await testPings();
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -130,26 +170,41 @@ class _HomePageState extends State<HomePage> {
     final map = <String, int>{};
     for (final part in value.split(';')) {
       final pair = part.trim().split('=');
-      if (pair.length == 2) map[pair[0]] = int.tryParse(pair[1]) ?? 0;
+      if (pair.length == 2) {
+        map[pair[0].trim().toLowerCase()] = int.tryParse(pair[1].trim()) ?? 0;
+      }
     }
-    return SubscriptionInfo(upload: map['upload'] ?? 0, download: map['download'] ?? 0, total: map['total'] ?? 0, expire: map['expire'] ?? 0);
+    return SubscriptionInfo(
+      upload: map['upload'] ?? 0,
+      download: map['download'] ?? 0,
+      total: map['total'] ?? 0,
+      expire: map['expire'] ?? 0,
+    );
   }
 
   String _decodeSubscription(String input) {
     final direct = input.trim();
     const schemes = [
-      'vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://',
-      'hysteria://', 'hysteria2://', 'hy2://', 'hy://', 'tuic://', 'wireguard://',
+      'vless://',
+      'vmess://',
+      'trojan://',
+      'ss://',
+      'ssr://',
+      'hysteria://',
+      'hysteria2://',
+      'hy2://',
+      'hy://',
+      'tuic://',
+      'wireguard://',
     ];
     if (schemes.any(direct.startsWith)) return direct;
 
-    String current = direct;
+    var current = direct;
     for (var i = 0; i < 3; i++) {
       try {
         var normalized = current.replaceAll('-', '+').replaceAll('_', '/');
         normalized += '=' * ((4 - normalized.length % 4) % 4);
-        final bytes = base64.decode(normalized);
-        final next = utf8.decode(bytes, allowMalformed: true).trim();
+        final next = utf8.decode(base64.decode(normalized), allowMalformed: true).trim();
         if (next.isEmpty || next == current) break;
         current = next;
       } catch (_) {
@@ -161,7 +216,19 @@ class _HomePageState extends State<HomePage> {
 
   List<ServerConfig> _parseConfigs(String text) {
     final result = <ServerConfig>[];
-    const supported = {'vless', 'vmess', 'trojan', 'ss', 'ssr', 'hysteria', 'hysteria2', 'hy2', 'hy', 'tuic', 'wireguard'};
+    const supported = {
+      'vless',
+      'vmess',
+      'trojan',
+      'ss',
+      'ssr',
+      'hysteria',
+      'hysteria2',
+      'hy2',
+      'hy',
+      'tuic',
+      'wireguard',
+    };
 
     for (final raw in text.split(RegExp(r'[\r\n]+'))) {
       final line = raw.trim();
@@ -170,8 +237,8 @@ class _HomePageState extends State<HomePage> {
       if (uri == null) continue;
       final type = uri.scheme.toLowerCase();
       if (!supported.contains(type)) continue;
-      final port = uri.hasPort ? uri.port : 443;
       final host = uri.host.isNotEmpty ? uri.host : _hostFromRaw(line);
+      final port = uri.hasPort ? uri.port : 443;
       if (host.isEmpty) continue;
       result.add(ServerConfig(raw: line, type: type, address: host, port: port));
     }
@@ -191,19 +258,87 @@ class _HomePageState extends State<HomePage> {
   Future<void> testPings() async {
     if (configs.isEmpty) return;
     setState(() => testing = true);
+
     await Future.wait(configs.map((server) async {
       final watch = Stopwatch()..start();
       try {
-        final socket = await Socket.connect(server.address, server.port, timeout: const Duration(seconds: 3));
+        final socket = await Socket.connect(
+          server.address,
+          server.port,
+          timeout: const Duration(seconds: 3),
+        );
         await socket.close();
         server.ping = watch.elapsedMilliseconds;
       } catch (_) {
         server.ping = null;
       }
     }));
+
     configs.sort((a, b) => (a.ping ?? 999999).compareTo(b.ping ?? 999999));
     if (!mounted) return;
     setState(() => testing = false);
+  }
+
+  Future<void> connectBestServer() async {
+    if (connecting || connected) return;
+
+    if (configs.isEmpty) {
+      await loadSubscription();
+      if (configs.isEmpty) return;
+    }
+
+    setState(() {
+      connecting = true;
+      status = 'در حال آماده‌سازی سریع‌ترین سرور...';
+    });
+
+    try {
+      final url = urlController.text.trim();
+      if (url.isEmpty) throw Exception('Subscription URL خالی است');
+
+      // The plugin converts the subscription into a native sing-box profile.
+      final profile = await ProfileService().importProfile(
+        subscribeLink: Uri.parse(url),
+        userAgent: 'LightSpeed/1.0',
+      );
+
+      final source = File(profile.typed.path);
+      final target = await ProfileStorage().getUsingConfig();
+      await target.parent.create(recursive: true);
+      await source.copy(target.path);
+      ProfileStorage().setSelectedProfile(profile.id);
+
+      await vpn.startVpn();
+
+      if (!mounted) return;
+      setState(() {
+        connected = true;
+        connecting = false;
+        status = 'متصل • ${configs.isNotEmpty ? configs.first.address : profile.name}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        connecting = false;
+        connected = false;
+        status = 'خطای اتصال: $e';
+      });
+    }
+  }
+
+  Future<void> disconnectVpn() async {
+    try {
+      await vpn.stopVpn();
+    } catch (e) {
+      if (mounted) setState(() => status = 'خطای قطع اتصال: $e');
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        connected = false;
+        status = 'اتصال قطع شد';
+      });
+    }
   }
 
   String _bytes(int bytes) {
@@ -219,15 +354,25 @@ class _HomePageState extends State<HomePage> {
 
   String _expire(int timestamp) {
     if (timestamp <= 0) return 'نامشخص';
-    return DateFormat('yyyy/MM/dd').format(DateTime.fromMillisecondsSinceEpoch(timestamp * 1000));
+    return DateFormat('yyyy/MM/dd').format(
+      DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Light speed 🔥', style: TextStyle(fontWeight: FontWeight.bold)),
-        actions: [IconButton(onPressed: loading ? null : loadSubscription, icon: const Icon(Icons.refresh))],
+        title: const Text(
+          'Light speed 🔥',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            onPressed: loading ? null : loadSubscription,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: loadSubscription,
@@ -241,24 +386,53 @@ class _HomePageState extends State<HomePage> {
                 labelText: 'Subscription URL',
                 hintText: 'https://...',
                 prefixIcon: const Icon(Icons.link),
-                suffixIcon: IconButton(icon: const Icon(Icons.download), onPressed: loading ? null : loadSubscription),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.download),
+                  onPressed: loading ? null : loadSubscription,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
               ),
             ),
             const SizedBox(height: 12),
             Text(status, textAlign: TextAlign.center),
-            if (subscription != null) ...[const SizedBox(height: 16), _trafficCard(subscription!)],
+            const SizedBox(height: 8),
+            Text(coreVersion, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: connecting ? null : (connected ? disconnectVpn : connectBestServer),
+              icon: Icon(connected ? Icons.stop_circle : Icons.power_settings_new),
+              label: Text(connected ? 'قطع VPN' : 'اتصال به سریع‌ترین سرور'),
+            ),
+            if (subscription != null) ...[
+              const SizedBox(height: 16),
+              _trafficCard(subscription!),
+            ],
             const SizedBox(height: 16),
             if (configs.isNotEmpty)
               Row(
                 children: [
-                  const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'سرورها',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
                   const Spacer(),
-                  if (testing) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-                  IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
+                  if (testing)
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  IconButton(
+                    onPressed: testing ? null : testPings,
+                    icon: const Icon(Icons.speed),
+                  ),
                 ],
               ),
-            ...configs.asMap().entries.map((entry) => _serverCard(entry.key + 1, entry.value)),
+            ...configs.asMap().entries.map(
+              (entry) => _serverCard(entry.key + 1, entry.value),
+            ),
           ],
         ),
       ),
@@ -272,9 +446,16 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text(
+              '📊 اطلاعات اشتراک',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 12),
-            LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
+            LinearProgressIndicator(
+              value: info.progress,
+              minHeight: 8,
+              borderRadius: BorderRadius.circular(8),
+            ),
             const SizedBox(height: 12),
             Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
             Text('آپلود: ${_bytes(info.upload)}'),
@@ -290,15 +471,26 @@ class _HomePageState extends State<HomePage> {
   Widget _serverCard(int index, ServerConfig server) {
     final fastest = index == 1 && server.ping != null;
     final hashIndex = server.raw.indexOf('#');
-    final name = hashIndex >= 0 && hashIndex + 1 < server.raw.length ? Uri.decodeComponent(server.raw.substring(hashIndex + 1)) : server.type.toUpperCase();
+    final name = hashIndex >= 0 && hashIndex + 1 < server.raw.length
+        ? Uri.decodeComponent(server.raw.substring(hashIndex + 1))
+        : server.type.toUpperCase();
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
         leading: CircleAvatar(child: Text('$index')),
         title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('${server.type.toUpperCase()} • ${server.address}:${server.port}', maxLines: 1, overflow: TextOverflow.ellipsis),
-        trailing: fastest ? Text('⚡ ${server.ping} ms', style: const TextStyle(fontWeight: FontWeight.bold)) : Text(server.ping == null ? '—' : '${server.ping} ms'),
+        subtitle: Text(
+          '${server.type.toUpperCase()} • ${server.address}:${server.port}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: fastest
+            ? Text(
+                '⚡ ${server.ping} ms',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              )
+            : Text(server.ping == null ? '—' : '${server.ping} ms'),
       ),
     );
   }
