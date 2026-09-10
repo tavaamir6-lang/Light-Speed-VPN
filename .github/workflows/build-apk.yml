@@ -1,0 +1,95 @@
+name: Build Light speed APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Light speed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Flutter 3.47.2
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          dart --version
+          java -version
+
+      - name: Recreate clean Android project
+        run: |
+          set -euo pipefail
+          rm -rf android
+          flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed --no-pub
+
+      - name: Configure Android repositories for sing-box
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/settings.gradle.kts")
+          s = p.read_text()
+          block = '''\n\n// Light speed: repository required by flutter_sing_box/libbox.\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n'''
+          if 'dependencyResolutionManagement {' not in s:
+              s += block
+          elif 'https://jitpack.io' not in s:
+              marker = 'dependencyResolutionManagement {'
+              start = s.index(marker)
+              repos = s.index('repositories {', start)
+              insert_at = s.index('\n', repos) + 1
+              s = s[:insert_at] + '        maven { url = uri("https://jitpack.io") }\n' + s[insert_at:]
+          p.write_text(s)
+          PY
+          grep -n -A12 -B2 "dependencyResolutionManagement" android/settings.gradle.kts
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          APK=$(find build/app/outputs/flutter-apk -type f -name '*.apk' -print -quit)
+          test -n "$APK"
+          echo "APK=$APK"
+          sha256sum "$APK"
+          ls -lh "$APK"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-speed-vpn-apk
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+# Build trigger marker: 2026-09-10-22
