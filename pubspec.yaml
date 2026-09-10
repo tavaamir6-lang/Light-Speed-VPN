@@ -1,7 +1,7 @@
 name: light_speed_vpn
 description: "Light speed 🔥 independent multi-protocol VPN client."
 publish_to: 'none'
-version: 1.0.0+3
+version: 1.0.0+4
 
 environment:
   sdk: '>=3.13.0 <4.0.0'
@@ -16,7 +16,7 @@ dependencies:
   http: 1.6.0
   shared_preferences: 2.5.3
   url_launcher: 6.3.2
-  intl: 0.20.2
+  intl: 0.20.3
 
 dev_dependencies:
   flutter_test:
