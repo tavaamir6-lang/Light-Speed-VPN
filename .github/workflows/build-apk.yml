@@ -53,7 +53,6 @@ jobs:
 
           settings = Path('android/settings.gradle.kts')
           s = settings.read_text()
-          # flutter_sing_box 1.1.5 was built/tested with AGP 8.13.2 + Kotlin 2.3.20.
           s = re.sub(r'id\("com\.android\.application"\) version "[^"]+" apply false',
                      'id("com.android.application") version "8.13.2" apply false', s)
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
@@ -64,8 +63,6 @@ jobs:
                   pos = s.index(marker)
                   repo_pos = s.index('repositories {', pos) + len('repositories {')
                   s = s[:repo_pos] + '\n        maven { url = uri("https://jitpack.io") }' + s[repo_pos:]
-              else:
-                  s += '\n\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n'
           settings.write_text(s)
 
           app = Path('android/app/build.gradle.kts')
@@ -79,7 +76,7 @@ jobs:
 
           wrapper = Path('android/gradle/wrapper/gradle-wrapper.properties')
           w = wrapper.read_text()
-          w = re.sub(r'gradle-[0-9.]+-all\.zip', 'gradle-8.13-all.zip', w)
+          w = re.sub(r'gradle-[0-9.]+-all\.zip', 'gradle-8.14-all.zip', w)
           wrapper.write_text(w)
           PY
 
@@ -118,4 +115,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-singbox-1.13.15
+# Build trigger marker: 2026-09-11-singbox-1.13.15-gradle-8.14
