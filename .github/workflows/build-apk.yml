@@ -43,6 +43,12 @@ jobs:
           rm -rf android
           flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
 
+      - name: Add JitPack repository for sing-box libbox
+        run: |
+          set -euo pipefail
+          sed -i '/mavenCentral()/a\        maven { url = uri("https://jitpack.io") }' android/settings.gradle.kts
+          grep -n "jitpack.io" android/settings.gradle.kts
+
       - name: Get dependencies
         run: flutter pub get
 
@@ -70,4 +76,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-4
+# Build trigger marker: 2026-09-10-5
