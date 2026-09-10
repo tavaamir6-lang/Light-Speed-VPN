@@ -72,16 +72,21 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("android/build.gradle.kts")
+          p = Path("android/settings.gradle.kts")
           s = p.read_text()
-          if 'uri("local-maven")' not in s:
-              marker = "allprojects {\n    repositories {"
-              if marker not in s:
-                  raise SystemExit("allprojects repositories block not found")
-              s = s.replace(marker, marker + '\n        maven { url = uri("local-maven") }', 1)
+          marker = "dependencyResolutionManagement {"
+          if marker not in s:
+              raise SystemExit("dependencyResolutionManagement block not found")
+          start = s.index(marker)
+          repos = s.index("repositories {", start)
+          end = s.index("\n    }", repos)
+          block = s[repos:end]
+          if 'uri("local-maven")' not in block:
+              insert_at = s.index("\n", repos) + 1
+              s = s[:insert_at] + '        maven { url = uri("local-maven") }\n' + s[insert_at:]
               p.write_text(s)
           PY
-          grep -n -A8 "allprojects" android/build.gradle.kts
+          grep -n -A8 "dependencyResolutionManagement" android/settings.gradle.kts
 
       - name: Get dependencies
         run: flutter pub get
@@ -110,4 +115,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-9
+# Build trigger marker: 2026-09-10-10
