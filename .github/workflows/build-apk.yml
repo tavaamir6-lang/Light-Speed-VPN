@@ -25,15 +25,23 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Setup Flutter
+      - name: Setup Flutter 3.24.5
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
           channel: stable
           cache: true
 
-      - name: Complete Android project
-        run: flutter create . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          dart --version
+          java -version
+
+      - name: Recreate clean Android project
+        run: |
+          rm -rf android
+          flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
 
       - name: Get dependencies
         run: flutter pub get
@@ -62,4 +70,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-2
+# Build trigger marker: 2026-09-10-3
