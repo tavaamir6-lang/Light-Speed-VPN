@@ -61,3 +61,5 @@ jobs:
           name: light-speed-vpn-apk
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
+
+# Build trigger marker: 2026-09-10
