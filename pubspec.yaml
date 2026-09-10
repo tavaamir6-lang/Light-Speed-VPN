@@ -13,7 +13,7 @@ dependencies:
   cupertino_icons: 1.0.8
   flutter_sing_box: 1.1.5
   mmkv: 2.4.2
-  http: 1.5.0
+  http: 1.6.0
   shared_preferences: 2.5.3
   url_launcher: 6.3.2
   intl: 0.20.2
