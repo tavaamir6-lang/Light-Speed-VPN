@@ -40,6 +40,7 @@ jobs:
 
       - name: Recreate clean Android project
         run: |
+          set -euo pipefail
           rm -rf android
           flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
 
@@ -76,4 +77,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-5
+# Build trigger marker: 2026-09-10-7
