@@ -99,10 +99,6 @@ class _HomePageState extends State<HomePage> {
   String coreVersion = 'sing-box';
   String? activeOutbound;
 
-  Timer? healthTimer;
-  bool healthCheckRunning = false;
-  int consecutiveHealthFailures = 0;
-
   @override
   void initState() {
     super.initState();
@@ -336,7 +332,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-\n  // Light speed: persistent health monitor\n  bool _hasHealthyNativeOutbound() {\n    for (final group in groups) {\n      final items = group.items;\n      if (items == null || items.isEmpty || !group.selectable) continue;\n      for (final item in items) {\n        if (item.urlTestDelay > 0 && item.urlTestDelay < 65000) return true;\n      }\n    }\n    return false;\n  }\n\n  void _startHealthMonitor() {\n    _stopHealthMonitor();\n    consecutiveHealthFailures = 0;\n    healthTimer = Timer.periodic(const Duration(seconds: 45), (_) {\n      _runHealthCheck();\n    });\n  }\n\n  void _stopHealthMonitor() {\n    healthTimer?.cancel();\n    healthTimer = null;\n    healthCheckRunning = false;\n    consecutiveHealthFailures = 0;\n  }\n\n  Future<void> _runHealthCheck() async {\n    if (!connected || connecting || !autoConnect || healthCheckRunning) return;\n    healthCheckRunning = true;\n    try {\n      await _runNativeUrlTests();\n      if (_hasHealthyNativeOutbound()) {\n        consecutiveHealthFailures = 0;\n        await _selectFastestNativeOutbound();\n      } else {\n        consecutiveHealthFailures++;\n        if (mounted) {\n          setState(() {\n            status = 'سرورها پاسخ نمی‌دهند • تلاش ${consecutiveHealthFailures}/3';\n          });\n        }\n        if (consecutiveHealthFailures >= 3) {\n          consecutiveHealthFailures = 0;\n          if (mounted) {\n            setState(() {\n              connected = false;\n              activeOutbound = null;\n              connecting = false;\n              status = 'اتصال از دست رفت؛ در حال انتخاب سرور سالم...';\n            });\n          }\n          try {\n            await vpn.stopVpn();\n          } catch (_) {}\n          await Future<void>.delayed(const Duration(milliseconds: 500));\n          if (mounted && autoConnect) {\n            await connectBestServer();\n          }\n        }\n      }\n    } catch (e) {\n      consecutiveHealthFailures++;\n      debugPrint('health check failed: $e');\n    } finally {\n      healthCheckRunning = false;\n    }\n  }\n
   Future<void> connectBestServer() async {
     if (connecting || connected) return;
 
@@ -360,15 +355,10 @@ class _HomePageState extends State<HomePage> {
       await source.copy(target.path);
       profileStorage.setSelectedProfile(profile.id);
 
-      // Start the native Android VPN/TUN first. The plugin exposes the
-      // native sing-box groups after the profile is running.
       await vpn.startVpn();
       await Future<void>.delayed(const Duration(seconds: 2));
-
       await _runNativeUrlTests();
       await _selectFastestNativeOutbound();
-
-      _startHealthMonitor();
 
       if (!mounted) return;
       setState(() {
@@ -379,7 +369,6 @@ class _HomePageState extends State<HomePage> {
         }
       });
     } catch (e) {
-      _stopHealthMonitor();
       try {
         await vpn.stopVpn();
       } catch (_) {}
@@ -394,7 +383,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> disconnectVpn() async {
-    _stopHealthMonitor();
     try {
       await vpn.stopVpn();
     } catch (e) {
@@ -541,7 +529,6 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    _stopHealthMonitor();
     groupSubscription?.cancel();
     urlController.dispose();
     super.dispose();
