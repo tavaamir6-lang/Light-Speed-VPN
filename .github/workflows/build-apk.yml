@@ -12,7 +12,7 @@ jobs:
   build:
     name: Build Light speed APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -25,10 +25,10 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Setup Flutter 3.24.5
+      - name: Setup Flutter 3.47.2
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5'
+          flutter-version: '3.47.2'
           channel: stable
           cache: true
 
@@ -70,4 +70,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-3
+# Build trigger marker: 2026-09-10-4
