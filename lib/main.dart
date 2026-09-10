@@ -82,18 +82,30 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final urlController = TextEditingController();
+  final ProfileService profileService = ProfileService();
+  final ProfileStorage profileStorage = ProfileStorage();
+
+  StreamSubscription<List<ClientGroup>>? groupSubscription;
+  List<ClientGroup> groups = [];
   List<ServerConfig> configs = [];
   SubscriptionInfo? subscription;
+
   bool loading = false;
   bool testing = false;
   bool connecting = false;
   bool connected = false;
+  bool autoConnect = true;
   String status = 'لینک Subscription را وارد کن';
   String coreVersion = 'sing-box';
+  String? activeOutbound;
 
   @override
   void initState() {
     super.initState();
+    groupSubscription = vpn.groupStream.listen((value) {
+      groups = value;
+      if (mounted) setState(() {});
+    });
     _loadCoreVersion();
     _restoreUrl();
   }
@@ -132,7 +144,7 @@ class _HomePageState extends State<HomePage> {
         'User-Agent': 'LightSpeed/1.0',
         'Accept': '*/*',
         'Cache-Control': 'no-cache',
-      }).timeout(const Duration(seconds: 20));
+      }).timeout(const Duration(seconds: 30));
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException('HTTP ${response.statusCode}');
@@ -155,11 +167,15 @@ class _HomePageState extends State<HomePage> {
 
       if (parsed.isNotEmpty) {
         await testPings();
+        if (autoConnect && !connected) {
+          await connectBestServer();
+        }
       }
     } catch (e) {
       if (!mounted) return;
       setState(() {
         loading = false;
+        connecting = false;
         status = 'خطا در دریافت Subscription: $e';
       });
     }
@@ -183,23 +199,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _decodeSubscription(String input) {
-    final direct = input.trim();
+    var current = input.trim();
     const schemes = [
-      'vless://',
-      'vmess://',
-      'trojan://',
-      'ss://',
-      'ssr://',
-      'hysteria://',
-      'hysteria2://',
-      'hy2://',
-      'hy://',
-      'tuic://',
+      'vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://',
+      'hysteria://', 'hysteria2://', 'hy2://', 'hy://', 'tuic://',
       'wireguard://',
     ];
-    if (schemes.any(direct.startsWith)) return direct;
+    if (schemes.any(current.startsWith)) return current;
 
-    var current = direct;
     for (var i = 0; i < 3; i++) {
       try {
         var normalized = current.replaceAll('-', '+').replaceAll('_', '/');
@@ -217,17 +224,8 @@ class _HomePageState extends State<HomePage> {
   List<ServerConfig> _parseConfigs(String text) {
     final result = <ServerConfig>[];
     const supported = {
-      'vless',
-      'vmess',
-      'trojan',
-      'ss',
-      'ssr',
-      'hysteria',
-      'hysteria2',
-      'hy2',
-      'hy',
-      'tuic',
-      'wireguard',
+      'vless', 'vmess', 'trojan', 'ss', 'ssr', 'hysteria',
+      'hysteria2', 'hy2', 'hy', 'tuic', 'wireguard',
     };
 
     for (final raw in text.split(RegExp(r'[\r\n]+'))) {
@@ -256,7 +254,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> testPings() async {
-    if (configs.isEmpty) return;
+    if (configs.isEmpty || testing) return;
     setState(() => testing = true);
 
     await Future.wait(configs.map((server) async {
@@ -279,6 +277,61 @@ class _HomePageState extends State<HomePage> {
     setState(() => testing = false);
   }
 
+  Future<Profile?> _importProfile() async {
+    final url = urlController.text.trim();
+    if (url.isEmpty) throw Exception('Subscription URL خالی است');
+    return profileService.importProfile(
+      subscribeLink: Uri.parse(url),
+      userAgent: 'LightSpeed/1.0',
+      autoUpdateInterval: 12,
+    );
+  }
+
+  Future<void> _runNativeUrlTests() async {
+    final currentGroups = List<ClientGroup>.from(groups);
+    for (final group in currentGroups) {
+      if (group.items == null || group.items!.isEmpty) continue;
+      try {
+        await vpn.urlTest(groupTag: group.tag);
+      } catch (e) {
+        debugPrint('urlTest ${group.tag} failed: $e');
+      }
+    }
+    await Future<void>.delayed(const Duration(seconds: 2));
+  }
+
+  Future<void> _selectFastestNativeOutbound() async {
+    ClientGroup? bestGroup;
+    ClientGroupItem? bestItem;
+
+    for (final group in groups) {
+      final items = group.items;
+      if (items == null || items.isEmpty || !group.selectable) continue;
+      for (final item in items) {
+        final delay = item.urlTestDelay;
+        if (delay <= 0) continue;
+        if (bestItem == null || delay < bestItem.urlTestDelay) {
+          bestGroup = group;
+          bestItem = item;
+        }
+      }
+    }
+
+    if (bestGroup == null || bestItem == null) return;
+
+    await vpn.selectOutbound(
+      groupTag: bestGroup.tag,
+      outboundTag: bestItem.tag,
+    );
+    activeOutbound = bestItem.tag;
+
+    if (mounted) {
+      setState(() {
+        status = 'متصل • سریع‌ترین: ${bestItem!.tag} (${bestItem.urlTestDelay} ms)';
+      });
+    }
+  }
+
   Future<void> connectBestServer() async {
     if (connecting || connected) return;
 
@@ -293,34 +346,40 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      final url = urlController.text.trim();
-      if (url.isEmpty) throw Exception('Subscription URL خالی است');
-
-      // The plugin converts the subscription into a native sing-box profile.
-      final profile = await ProfileService().importProfile(
-        subscribeLink: Uri.parse(url),
-        userAgent: 'LightSpeed/1.0',
-      );
+      final profile = await _importProfile();
+      if (profile == null) throw Exception('Profile ساخته نشد');
 
       final source = File(profile.typed.path);
-      final target = await ProfileStorage().getUsingConfig();
+      final target = await profileStorage.getUsingConfig();
       await target.parent.create(recursive: true);
       await source.copy(target.path);
-      ProfileStorage().setSelectedProfile(profile.id);
+      profileStorage.setSelectedProfile(profile.id);
 
+      // Start the native Android VPN/TUN first. The plugin exposes the
+      // native sing-box groups after the profile is running.
       await vpn.startVpn();
+      await Future<void>.delayed(const Duration(seconds: 2));
+
+      await _runNativeUrlTests();
+      await _selectFastestNativeOutbound();
 
       if (!mounted) return;
       setState(() {
         connected = true;
         connecting = false;
-        status = 'متصل • ${configs.isNotEmpty ? configs.first.address : profile.name}';
+        if (activeOutbound == null) {
+          status = 'متصل • ${configs.first.address}';
+        }
       });
     } catch (e) {
+      try {
+        await vpn.stopVpn();
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         connecting = false;
         connected = false;
+        activeOutbound = null;
         status = 'خطای اتصال: $e';
       });
     }
@@ -336,6 +395,7 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         connected = false;
+        activeOutbound = null;
         status = 'اتصال قطع شد';
       });
     }
@@ -363,10 +423,7 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Light speed 🔥',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
+        title: const Text('Light speed 🔥', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
           IconButton(
             onPressed: loading ? null : loadSubscription,
@@ -390,12 +447,16 @@ class _HomePageState extends State<HomePage> {
                   icon: const Icon(Icons.download),
                   onPressed: loading ? null : loadSubscription,
                 ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(18),
-                ),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
               ),
             ),
             const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('اتصال خودکار به سریع‌ترین سرور'),
+              value: autoConnect,
+              onChanged: connected ? null : (value) => setState(() => autoConnect = value),
+            ),
             Text(status, textAlign: TextAlign.center),
             const SizedBox(height: 8),
             Text(coreVersion, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
@@ -413,26 +474,14 @@ class _HomePageState extends State<HomePage> {
             if (configs.isNotEmpty)
               Row(
                 children: [
-                  const Text(
-                    'سرورها',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
+                  const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                   const Spacer(),
                   if (testing)
-                    const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  IconButton(
-                    onPressed: testing ? null : testPings,
-                    icon: const Icon(Icons.speed),
-                  ),
+                    const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                  IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
                 ],
               ),
-            ...configs.asMap().entries.map(
-              (entry) => _serverCard(entry.key + 1, entry.value),
-            ),
+            ...configs.asMap().entries.map((entry) => _serverCard(entry.key + 1, entry.value)),
           ],
         ),
       ),
@@ -446,16 +495,9 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '📊 اطلاعات اشتراک',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            LinearProgressIndicator(
-              value: info.progress,
-              minHeight: 8,
-              borderRadius: BorderRadius.circular(8),
-            ),
+            LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
             const SizedBox(height: 12),
             Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
             Text('آپلود: ${_bytes(info.upload)}'),
@@ -480,16 +522,9 @@ class _HomePageState extends State<HomePage> {
       child: ListTile(
         leading: CircleAvatar(child: Text('$index')),
         title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text(
-          '${server.type.toUpperCase()} • ${server.address}:${server.port}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
+        subtitle: Text('${server.type.toUpperCase()} • ${server.address}:${server.port}', maxLines: 1, overflow: TextOverflow.ellipsis),
         trailing: fastest
-            ? Text(
-                '⚡ ${server.ping} ms',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              )
+            ? Text('⚡ ${server.ping} ms', style: const TextStyle(fontWeight: FontWeight.bold))
             : Text(server.ping == null ? '—' : '${server.ping} ms'),
       ),
     );
@@ -497,6 +532,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    groupSubscription?.cancel();
     urlController.dispose();
     super.dispose();
   }
