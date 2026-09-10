@@ -16,10 +16,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -44,49 +44,25 @@ jobs:
           rm -rf android
           flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed
 
-      - name: Prepare pinned sing-box libbox 1.13.15
-        run: |
-          set -euo pipefail
-          VERSION="1.13.15"
-          REPO="android/local-maven/com/github/singbox-android/libbox/${VERSION}"
-          mkdir -p "$REPO"
-          curl -fL --retry 5 --retry-all-errors \
-            "https://jitpack.io/com/github/singbox-android/libbox/${VERSION}/libbox-${VERSION}.aar" \
-            -o "$REPO/libbox-${VERSION}.aar"
-          cat > "$REPO/libbox-${VERSION}.pom" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <project xmlns="http://maven.apache.org/POM/4.0.0"
-                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>com.github.singbox-android</groupId>
-            <artifactId>libbox</artifactId>
-            <version>1.13.15</version>
-            <packaging>aar</packaging>
-          </project>
-          EOF
-          ls -lh "$REPO"
-
-      - name: Add local Maven repository for libbox
+      - name: Configure Android repositories for sing-box
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           p = Path("android/settings.gradle.kts")
           s = p.read_text()
-          marker = "dependencyResolutionManagement {"
-          if marker not in s:
-              raise SystemExit("dependencyResolutionManagement block not found")
-          start = s.index(marker)
-          repos = s.index("repositories {", start)
-          end = s.index("\n    }", repos)
-          block = s[repos:end]
-          if 'uri("local-maven")' not in block:
-              insert_at = s.index("\n", repos) + 1
-              s = s[:insert_at] + '        maven { url = uri("local-maven") }\n' + s[insert_at:]
-              p.write_text(s)
+          block = '''\n\n// Light speed: repository required by flutter_sing_box/libbox.\ndependencyResolutionManagement {\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n'''
+          if 'dependencyResolutionManagement {' not in s:
+              s += block
+          elif 'https://jitpack.io' not in s:
+              marker = 'dependencyResolutionManagement {'
+              start = s.index(marker)
+              repos = s.index('repositories {', start)
+              insert_at = s.index('\n', repos) + 1
+              s = s[:insert_at] + '        maven { url = uri("https://jitpack.io") }\n' + s[insert_at:]
+          p.write_text(s)
           PY
-          grep -n -A8 "dependencyResolutionManagement" android/settings.gradle.kts
+          grep -n -A12 -B2 "dependencyResolutionManagement" android/settings.gradle.kts
 
       - name: Get dependencies
         run: flutter pub get
@@ -106,6 +82,7 @@ jobs:
           APK=$(find build/app/outputs/flutter-apk -type f -name '*.apk' -print -quit)
           test -n "$APK"
           echo "APK=$APK"
+          sha256sum "$APK"
           ls -lh "$APK"
 
       - name: Upload APK
@@ -115,4 +92,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-10-10
+# Build trigger marker: 2026-09-10-21
