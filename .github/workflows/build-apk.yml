@@ -57,27 +57,19 @@ jobs:
                      'id("com.android.application") version "8.13.2" apply false', s)
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
                      'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
-
-          # Keep Flutter's generated repositories intact. Add a local Maven
-          # repository for the pinned native libbox artifact, instead of making
-          # Gradle resolve the runtime dependency directly from JitPack.
-          block = '''dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-              repositories {
-                  google()
-                  mavenCentral()
-                  maven { url = uri("$rootDir/local-maven") }
-              }
-          }
-
-          '''
+          # Do not override Flutter's project repositories from settings.gradle.kts.
+          # Flutter's generated Android plugin needs its own repository for engine artifacts.
           if 'dependencyResolutionManagement {' in s:
               start = s.index('dependencyResolutionManagement {')
               end = s.index('\n\nplugins {', start)
-              s = s[:start] + block.rstrip() + s[end:]
-          else:
-              s = s.replace('\nplugins {', '\n' + block + 'plugins {', 1)
+              s = s[:start] + s[end+2:]
           settings.write_text(s)
+
+          build = Path('android/build.gradle.kts')
+          b = build.read_text()
+          if 'maven { url = uri("$rootDir/local-maven") }' not in b:
+              b = b.replace('allprojects {\n    repositories {', 'allprojects {\n    repositories {\n        maven { url = uri("$rootDir/local-maven") }')
+          build.write_text(b)
 
           app = Path('android/app/build.gradle.kts')
           a = app.read_text()
@@ -96,6 +88,8 @@ jobs:
 
           echo '--- settings.gradle.kts ---'
           cat android/settings.gradle.kts
+          echo '--- android/build.gradle.kts ---'
+          cat android/build.gradle.kts
           echo '--- app/build.gradle.kts ---'
           grep -n -E 'compileSdk|minSdk|targetSdk|VERSION_17' android/app/build.gradle.kts || true
           echo '--- Gradle wrapper ---'
@@ -151,4 +145,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-local-libbox-maven-v1
+# Build trigger marker: 2026-09-11-repo-fix-v2
