@@ -57,12 +57,18 @@ jobs:
                      'id("com.android.application") version "8.13.2" apply false', s)
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
                      'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
-          if 'https://jitpack.io' not in s:
-              marker = 'dependencyResolutionManagement {'
-              if marker in s:
-                  pos = s.index(marker)
-                  repo_pos = s.index('repositories {', pos) + len('repositories {')
-                  s = s[:repo_pos] + '\n        maven { url = uri("https://jitpack.io") }' + s[repo_pos:]
+
+          # libbox 1.13.15 is published through JitPack. Add JitPack to every
+          # generated Gradle repository block because Flutter's template changed
+          # the settings layout across versions.
+          lines = s.splitlines()
+          out = []
+          for line in lines:
+              out.append(line)
+              if re.match(r'^\s*repositories\s*\{\s*$', line):
+                  indent = line[:len(line) - len(line.lstrip())] + '    '
+                  out.append(f'{indent}maven {{ url = uri("https://jitpack.io") }}')
+          s = '\n'.join(out) + ('\n' if s.endswith('\n') else '')
           settings.write_text(s)
 
           app = Path('android/app/build.gradle.kts')
@@ -115,4 +121,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-singbox-1.13.15-gradle-8.14
+# Build trigger marker: 2026-09-11-jitpack-libbox-1.13.15
