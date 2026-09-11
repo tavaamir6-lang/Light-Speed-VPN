@@ -58,17 +58,26 @@ jobs:
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
                      'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
 
-          # libbox 1.13.15 is published through JitPack. Add JitPack to every
-          # generated Gradle repository block because Flutter's template changed
-          # the settings layout across versions.
-          lines = s.splitlines()
-          out = []
-          for line in lines:
-              out.append(line)
-              if re.match(r'^\s*repositories\s*\{\s*$', line):
-                  indent = line[:len(line) - len(line.lstrip())] + '    '
-                  out.append(f'{indent}maven {{ url = uri("https://jitpack.io") }}')
-          s = '\n'.join(out) + ('\n' if s.endswith('\n') else '')
+          # Flutter 3.47 generates dependencyResolutionManagement with its own
+          # repository block. JitPack MUST be added there (not only to
+          # pluginManagement), otherwise Gradle never searches JitPack for libbox.
+          marker = 'dependencyResolutionManagement {\n'
+          if marker in s and 'https://jitpack.io' not in s:
+              s = s.replace(
+                  marker,
+                  marker + '    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n',
+                  1,
+              )
+          elif 'https://jitpack.io' not in s:
+              # Fallback for a future Flutter template layout.
+              lines = s.splitlines()
+              out = []
+              for line in lines:
+                  out.append(line)
+                  if re.match(r'^\s*repositories\s*\{\s*$', line):
+                      indent = line[:len(line) - len(line.lstrip())] + '    '
+                      out.append(f'{indent}maven {{ url = uri("https://jitpack.io") }}')
+              s = '\n'.join(out) + '\n'
           settings.write_text(s)
 
           app = Path('android/app/build.gradle.kts')
@@ -87,7 +96,7 @@ jobs:
           PY
 
           echo '--- settings.gradle.kts ---'
-          grep -n -E 'com.android.application|kotlin.android|jitpack' android/settings.gradle.kts || true
+          cat android/settings.gradle.kts
           echo '--- app/build.gradle.kts ---'
           grep -n -E 'compileSdk|minSdk|targetSdk|VERSION_17' android/app/build.gradle.kts || true
           echo '--- Gradle wrapper ---'
@@ -95,6 +104,16 @@ jobs:
 
       - name: Get dependencies
         run: flutter pub get
+
+      - name: Verify libbox repository resolution
+        run: |
+          set -euo pipefail
+          echo 'Checking JitPack libbox 1.13.15 metadata...'
+          curl -fL --retry 3 --retry-delay 2 -sS \
+            https://jitpack.io/com/github/singbox-android/libbox/1.13.15/libbox-1.13.15.pom \
+            -o /tmp/libbox-1.13.15.pom
+          test -s /tmp/libbox-1.13.15.pom
+          head -n 20 /tmp/libbox-1.13.15.pom
 
       - name: Analyze
         run: flutter analyze
@@ -121,4 +140,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-jitpack-libbox-1.13.15
+# Build trigger marker: 2026-09-11-fix-jitpack-repository-resolution
