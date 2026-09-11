@@ -44,7 +44,7 @@ jobs:
           rm -rf android
           flutter create -t app . --platforms=android --project-name=light_speed_vpn --org=com.lightspeed --no-pub
 
-      - name: Align Android toolchain for sing-box 1.13.15
+      - name: Configure Android toolchain and local libbox repository
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -58,23 +58,25 @@ jobs:
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
                      'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
 
-          # JitPack is required for the flutter_sing_box Android libbox artifact.
-          # Flutter 3.47's generated template puts plugin repositories inside
-          # pluginManagement; that is NOT enough for normal dependencies.
-          # Add a dedicated dependencyResolutionManagement block before plugins.
-          if 'dependencyResolutionManagement {' not in s:
-              s = s.replace(
-                  '\nplugins {',
-                  '\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n\nplugins {',
-                  1,
-              )
-          elif 'https://jitpack.io' not in s:
-              marker = 'dependencyResolutionManagement {\n'
-              s = s.replace(
-                  marker,
-                  marker + '    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n',
-                  1,
-              )
+          # Keep Flutter's generated repositories intact. Add a local Maven
+          # repository for the pinned native libbox artifact, instead of making
+          # Gradle resolve the runtime dependency directly from JitPack.
+          block = '''dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url = uri("$rootDir/local-maven") }
+              }
+          }
+
+          '''
+          if 'dependencyResolutionManagement {' in s:
+              start = s.index('dependencyResolutionManagement {')
+              end = s.index('\n\nplugins {', start)
+              s = s[:start] + block.rstrip() + s[end:]
+          else:
+              s = s.replace('\nplugins {', '\n' + block + 'plugins {', 1)
           settings.write_text(s)
 
           app = Path('android/app/build.gradle.kts')
@@ -99,18 +101,30 @@ jobs:
           echo '--- Gradle wrapper ---'
           grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
 
+      - name: Vendor pinned libbox 1.13.15 into local Maven repository
+        run: |
+          set -euo pipefail
+          VERSION='1.13.15'
+          BASE="https://jitpack.io/com/github/singbox-android/libbox/${VERSION}"
+          DEST="android/local-maven/com/github/singbox-android/libbox/${VERSION}"
+          mkdir -p "$DEST"
+          curl -fL --retry 5 --retry-delay 2 -sS "$BASE/libbox-${VERSION}.pom" -o "$DEST/libbox-${VERSION}.pom"
+          curl -fL --retry 5 --retry-delay 2 -sS "$BASE/libbox-${VERSION}.aar" -o "$DEST/libbox-${VERSION}.aar"
+          test -s "$DEST/libbox-${VERSION}.pom"
+          test -s "$DEST/libbox-${VERSION}.aar"
+          echo '--- vendored libbox ---'
+          ls -lh "$DEST"
+          sha256sum "$DEST/libbox-${VERSION}.aar"
+
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Verify libbox repository resolution
+      - name: Verify local libbox repository
         run: |
           set -euo pipefail
-          echo 'Checking JitPack libbox 1.13.15 metadata...'
-          curl -fL --retry 3 --retry-delay 2 -sS \
-            https://jitpack.io/com/github/singbox-android/libbox/1.13.15/libbox-1.13.15.pom \
-            -o /tmp/libbox-1.13.15.pom
-          test -s /tmp/libbox-1.13.15.pom
-          head -n 20 /tmp/libbox-1.13.15.pom
+          test -s android/local-maven/com/github/singbox-android/libbox/1.13.15/libbox-1.13.15.aar
+          test -s android/local-maven/com/github/singbox-android/libbox/1.13.15/libbox-1.13.15.pom
+          echo 'Local Maven libbox 1.13.15 is ready.'
 
       - name: Analyze
         run: flutter analyze
@@ -137,4 +151,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-fix-jitpack-dependency-resolution-v2
+# Build trigger marker: 2026-09-11-local-libbox-maven-v1
