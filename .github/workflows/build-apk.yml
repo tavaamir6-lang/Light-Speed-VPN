@@ -57,8 +57,6 @@ jobs:
                      'id("com.android.application") version "8.13.2" apply false', s)
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
                      'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
-          # Do not override Flutter's project repositories from settings.gradle.kts.
-          # Flutter's generated Android plugin needs its own repository for engine artifacts.
           if 'dependencyResolutionManagement {' in s:
               start = s.index('dependencyResolutionManagement {')
               end = s.index('\n\nplugins {', start)
@@ -77,7 +75,15 @@ jobs:
           a = re.sub(r'minSdk\s*=\s*[^\n]+', 'minSdk = 26', a)
           a = re.sub(r'targetSdk\s*=\s*[^\n]+', 'targetSdk = 36', a)
           if 'JavaVersion.VERSION_17' not in a:
-              a = a.replace('    defaultConfig {', '    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }\n\n    kotlinOptions {\n        jvmTarget = JavaVersion.VERSION_17.toString()\n    }\n\n    defaultConfig {')
+              a = a.replace('    defaultConfig {', '    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n    }\n\n    kotlinOptions {\n        jvmTarget = JavaVersion.VERSION_17.toString()\n    }\n\n    defaultConfig {')
+          elif 'isCoreLibraryDesugaringEnabled = true' not in a:
+              a = a.replace('        targetCompatibility = JavaVersion.VERSION_17\n', '        targetCompatibility = JavaVersion.VERSION_17\n        isCoreLibraryDesugaringEnabled = true\n')
+          if 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:' not in a:
+              marker = 'dependencies {\n'
+              if marker in a:
+                  a = a.replace(marker, marker + '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")\n', 1)
+              else:
+                  a += '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")\n}\n'
           app.write_text(a)
 
           wrapper = Path('android/gradle/wrapper/gradle-wrapper.properties')
@@ -91,7 +97,7 @@ jobs:
           echo '--- android/build.gradle.kts ---'
           cat android/build.gradle.kts
           echo '--- app/build.gradle.kts ---'
-          grep -n -E 'compileSdk|minSdk|targetSdk|VERSION_17' android/app/build.gradle.kts || true
+          grep -n -E 'compileSdk|minSdk|targetSdk|VERSION_17|desugar' android/app/build.gradle.kts || true
           echo '--- Gradle wrapper ---'
           grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
 
@@ -145,4 +151,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-repo-fix-v2
+# Build trigger marker: 2026-09-11-desugar-fix-v3
