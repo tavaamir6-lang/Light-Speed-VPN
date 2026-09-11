@@ -58,26 +58,23 @@ jobs:
           s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\) version "[^"]+" apply false',
                      'id("org.jetbrains.kotlin.android") version "2.3.20" apply false', s)
 
-          # Flutter 3.47 generates dependencyResolutionManagement with its own
-          # repository block. JitPack MUST be added there (not only to
-          # pluginManagement), otherwise Gradle never searches JitPack for libbox.
-          marker = 'dependencyResolutionManagement {\n'
-          if marker in s and 'https://jitpack.io' not in s:
+          # JitPack is required for the flutter_sing_box Android libbox artifact.
+          # Flutter 3.47's generated template puts plugin repositories inside
+          # pluginManagement; that is NOT enough for normal dependencies.
+          # Add a dedicated dependencyResolutionManagement block before plugins.
+          if 'dependencyResolutionManagement {' not in s:
+              s = s.replace(
+                  '\nplugins {',
+                  '\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)\n    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n}\n\nplugins {',
+                  1,
+              )
+          elif 'https://jitpack.io' not in s:
+              marker = 'dependencyResolutionManagement {\n'
               s = s.replace(
                   marker,
                   marker + '    repositories {\n        google()\n        mavenCentral()\n        maven { url = uri("https://jitpack.io") }\n    }\n',
                   1,
               )
-          elif 'https://jitpack.io' not in s:
-              # Fallback for a future Flutter template layout.
-              lines = s.splitlines()
-              out = []
-              for line in lines:
-                  out.append(line)
-                  if re.match(r'^\s*repositories\s*\{\s*$', line):
-                      indent = line[:len(line) - len(line.lstrip())] + '    '
-                      out.append(f'{indent}maven {{ url = uri("https://jitpack.io") }}')
-              s = '\n'.join(out) + '\n'
           settings.write_text(s)
 
           app = Path('android/app/build.gradle.kts')
@@ -140,4 +137,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-fix-jitpack-repository-resolution
+# Build trigger marker: 2026-09-11-fix-jitpack-dependency-resolution-v2
