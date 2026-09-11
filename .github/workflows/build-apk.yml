@@ -126,21 +126,6 @@ jobs:
           test -s android/local-maven/com/github/singbox-android/libbox/1.13.15/libbox-1.13.15.pom
           echo 'Local Maven libbox 1.13.15 is ready.'
 
-      - name: Patch subscription timeout for slow providers
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('lib/main.dart')
-          s = p.read_text()
-          old = "}).timeout(const Duration(seconds: 30));"
-          new = "}).timeout(const Duration(seconds: 90));"
-          if old not in s:
-              raise SystemExit('Expected subscription timeout expression was not found')
-          p.write_text(s.replace(old, new, 1))
-          PY
-          grep -n "timeout(const Duration(seconds:" lib/main.dart | head
-
       - name: Analyze
         run: flutter analyze
 
@@ -166,4 +151,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-subscription-timeout-90s
+# Build trigger marker: 2026-09-11-native-profile-import-v2
