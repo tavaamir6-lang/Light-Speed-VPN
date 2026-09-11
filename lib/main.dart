@@ -4,7 +4,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_sing_box/flutter_sing_box.dart';
-import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:mmkv/mmkv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -52,6 +51,7 @@ class ServerConfig {
     required this.type,
     required this.address,
     required this.port,
+    this.ping,
   });
 }
 
@@ -89,6 +89,7 @@ class _HomePageState extends State<HomePage> {
   List<ClientGroup> groups = [];
   List<ServerConfig> configs = [];
   SubscriptionInfo? subscription;
+  Profile? importedProfile;
 
   bool loading = false;
   bool testing = false;
@@ -104,7 +105,10 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     groupSubscription = vpn.groupStream.listen((value) {
       groups = value;
-      if (mounted) setState(() {});
+      if (mounted) {
+        _syncConfigsFromGroupsIfNeeded();
+        setState(() {});
+      }
     });
     _loadCoreVersion();
     _restoreUrl();
@@ -126,138 +130,182 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> loadSubscription() async {
+  /// New subscription architecture:
+  /// 1) Do NOT download the subscription with a separate Flutter http client.
+  /// 2) Let flutter_sing_box/ProfileService handle the remote subscription.
+  /// 3) Read the normalized local sing-box JSON produced by the plugin.
+  /// 4) Use the native sing-box groups/url-test for server selection.
+  /// This is the important difference from the old implementation: a 30s
+  /// Flutter HTTP timeout can no longer prevent the native profile importer
+  /// from reading the subscription.
+  Future<void> loadSubscription({bool autoConnectAfterLoad = true}) async {
     final url = urlController.text.trim();
     if (url.isEmpty) {
       if (mounted) setState(() => status = 'لینک Subscription را وارد کن');
       return;
     }
 
+    if (loading) return;
+
     setState(() {
       loading = true;
-      status = 'در حال دریافت Subscription...';
+      status = 'در حال خواندن Subscription با sing-box...';
     });
 
     try {
-      final uri = Uri.parse(url);
-      final response = await http.get(uri, headers: {
-        'User-Agent': 'LightSpeed/1.0',
-        'Accept': '*/*',
-        'Cache-Control': 'no-cache',
-      }).timeout(const Duration(seconds: 30));
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException('HTTP ${response.statusCode}');
-      }
-
-      final info = _parseUserInfo(response.headers['subscription-userinfo']);
-      final text = utf8.decode(response.bodyBytes, allowMalformed: true);
-      final parsed = _parseConfigs(_decodeSubscription(text));
+      final profile = await _importProfile();
+      importedProfile = profile;
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('subscription_url', url);
 
+      subscription = _subscriptionInfoFromProfile(profile);
+      configs = await _readServersFromProfile(profile);
+
+      // The native group stream can arrive just after importProfile returns.
+      await _waitForNativeGroups();
+      _syncConfigsFromGroupsIfNeeded();
+
       if (!mounted) return;
       setState(() {
-        subscription = info;
-        configs = parsed;
-        status = parsed.isEmpty ? 'کانفیگی پیدا نشد' : '${parsed.length} سرور پیدا شد';
         loading = false;
+        status = configs.isEmpty
+            ? 'Subscription خوانده شد ولی سروری پیدا نشد'
+            : '${configs.length} سرور خوانده شد';
       });
 
-      if (parsed.isNotEmpty) {
-        await testPings();
-        if (autoConnect && !connected) {
-          await connectBestServer();
-        }
+      if (autoConnectAfterLoad && autoConnect && !connected && configs.isNotEmpty) {
+        await connectBestServer();
       }
     } catch (e) {
       if (!mounted) return;
       setState(() {
         loading = false;
         connecting = false;
-        status = 'خطا در دریافت Subscription: $e';
+        status = 'خطا در خواندن Subscription: $e';
       });
     }
   }
 
-  SubscriptionInfo? _parseUserInfo(String? value) {
-    if (value == null || value.isEmpty) return null;
-    final map = <String, int>{};
-    for (final part in value.split(';')) {
-      final pair = part.trim().split('=');
-      if (pair.length == 2) {
-        map[pair[0].trim().toLowerCase()] = int.tryParse(pair[1].trim()) ?? 0;
-      }
-    }
-    return SubscriptionInfo(
-      upload: map['upload'] ?? 0,
-      download: map['download'] ?? 0,
-      total: map['total'] ?? 0,
-      expire: map['expire'] ?? 0,
+  Future<Profile?> _importProfile() async {
+    final url = urlController.text.trim();
+    if (url.isEmpty) throw Exception('Subscription URL خالی است');
+
+    // ProfileService uses the plugin's NetworkService/Dio stack instead of
+    // the old raw http.get() path. It also handles remote profile parsing,
+    // Base64 subscriptions and normalization into sing-box configuration.
+    return profileService.importProfile(
+      subscribeLink: Uri.parse(url),
+      userAgent: 'LightSpeed/1.0',
+      autoUpdateInterval: 12,
     );
   }
 
-  String _decodeSubscription(String input) {
-    var current = input.trim();
-    const schemes = [
-      'vless://', 'vmess://', 'trojan://', 'ss://', 'ssr://',
-      'hysteria://', 'hysteria2://', 'hy2://', 'hy://', 'tuic://',
-      'wireguard://',
-    ];
-    if (schemes.any(current.startsWith)) return current;
+  SubscriptionInfo? _subscriptionInfoFromProfile(Profile profile) {
+    try {
+      final dynamic info = profile.userInfo;
+      if (info == null) return null;
 
-    for (var i = 0; i < 3; i++) {
-      try {
-        var normalized = current.replaceAll('-', '+').replaceAll('_', '/');
-        normalized += '=' * ((4 - normalized.length % 4) % 4);
-        final next = utf8.decode(base64.decode(normalized), allowMalformed: true).trim();
-        if (next.isEmpty || next == current) break;
-        current = next;
-      } catch (_) {
-        break;
+      final dynamic raw = info.toJson();
+      if (raw is! Map) return null;
+
+      int value(String key) => int.tryParse('${raw[key] ?? 0}') ?? 0;
+      return SubscriptionInfo(
+        upload: value('upload'),
+        download: value('download'),
+        total: value('total'),
+        expire: value('expire'),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<List<ServerConfig>> _readServersFromProfile(Profile profile) async {
+    try {
+      final file = File(profile.typed.path);
+      if (!await file.exists()) return [];
+
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! Map) return [];
+      final rawOutbounds = decoded['outbounds'];
+      if (rawOutbounds is! List) return [];
+
+      const nodeTypes = {
+        'vless',
+        'vmess',
+        'trojan',
+        'shadowsocks',
+        'ss',
+        'hysteria',
+        'hysteria2',
+        'tuic',
+        'wireguard',
+        'ssh',
+        'naive',
+      };
+
+      final result = <ServerConfig>[];
+      for (final item in rawOutbounds) {
+        if (item is! Map) continue;
+
+        final type = '${item['type'] ?? ''}'.toLowerCase();
+        final address = '${item['server'] ?? ''}'.trim();
+        if (!nodeTypes.contains(type) || address.isEmpty) continue;
+
+        final port = int.tryParse('${item['server_port'] ?? 443}') ?? 443;
+        final tag = '${item['tag'] ?? type}'.trim();
+        result.add(ServerConfig(
+          raw: tag,
+          type: type,
+          address: address,
+          port: port,
+        ));
+      }
+
+      return result;
+    } catch (e) {
+      debugPrint('Reading normalized profile failed: $e');
+      return [];
+    }
+  }
+
+  Future<void> _waitForNativeGroups() async {
+    for (var i = 0; i < 25; i++) {
+      if (groups.any((group) => group.items?.isNotEmpty == true)) return;
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
+  void _syncConfigsFromGroupsIfNeeded() {
+    if (configs.isNotEmpty || groups.isEmpty) return;
+
+    final result = <ServerConfig>[];
+    for (final group in groups) {
+      final items = group.items;
+      if (items == null) continue;
+      for (final item in items) {
+        result.add(ServerConfig(
+          raw: item.tag,
+          type: item.type,
+          address: item.tag,
+          port: 0,
+          ping: item.urlTestDelay > 0 ? item.urlTestDelay : null,
+        ));
       }
     }
-    return current;
-  }
-
-  List<ServerConfig> _parseConfigs(String text) {
-    final result = <ServerConfig>[];
-    const supported = {
-      'vless', 'vmess', 'trojan', 'ss', 'ssr', 'hysteria',
-      'hysteria2', 'hy2', 'hy', 'tuic', 'wireguard',
-    };
-
-    for (final raw in text.split(RegExp(r'[\r\n]+'))) {
-      final line = raw.trim();
-      if (line.isEmpty || !line.contains('://')) continue;
-      final uri = Uri.tryParse(line);
-      if (uri == null) continue;
-      final type = uri.scheme.toLowerCase();
-      if (!supported.contains(type)) continue;
-      final host = uri.host.isNotEmpty ? uri.host : _hostFromRaw(line);
-      final port = uri.hasPort ? uri.port : 443;
-      if (host.isEmpty) continue;
-      result.add(ServerConfig(raw: line, type: type, address: host, port: port));
-    }
-    return result;
-  }
-
-  String _hostFromRaw(String raw) {
-    try {
-      final rest = raw.split('://').last;
-      final authority = rest.split('/').first.split('@').last;
-      return authority.split(':').first;
-    } catch (_) {
-      return '';
-    }
+    configs = result;
   }
 
   Future<void> testPings() async {
     if (configs.isEmpty || testing) return;
     setState(() => testing = true);
 
+    // This is only a lightweight reachability indicator for the UI.
+    // Actual proxy quality is measured by native sing-box urlTest after VPN
+    // startup, which is what is used for the real fastest-server decision.
     await Future.wait(configs.map((server) async {
+      if (server.port <= 0) return;
       final watch = Stopwatch()..start();
       try {
         final socket = await Socket.connect(
@@ -277,20 +325,11 @@ class _HomePageState extends State<HomePage> {
     setState(() => testing = false);
   }
 
-  Future<Profile?> _importProfile() async {
-    final url = urlController.text.trim();
-    if (url.isEmpty) throw Exception('Subscription URL خالی است');
-    return profileService.importProfile(
-      subscribeLink: Uri.parse(url),
-      userAgent: 'LightSpeed/1.0',
-      autoUpdateInterval: 12,
-    );
-  }
-
   Future<void> _runNativeUrlTests() async {
     final currentGroups = List<ClientGroup>.from(groups);
     for (final group in currentGroups) {
       if (group.items == null || group.items!.isEmpty) continue;
+      if (!group.selectable && group.type != 'urltest') continue;
       try {
         await vpn.urlTest(groupTag: group.tag);
       } catch (e) {
@@ -335,21 +374,24 @@ class _HomePageState extends State<HomePage> {
   Future<void> connectBestServer() async {
     if (connecting || connected) return;
 
-    if (configs.isEmpty) {
-      await loadSubscription();
-      if (configs.isEmpty) return;
+    if (importedProfile == null || configs.isEmpty) {
+      await loadSubscription(autoConnectAfterLoad: false);
+      if (importedProfile == null || configs.isEmpty) return;
     }
 
     setState(() {
       connecting = true;
-      status = 'در حال آماده‌سازی سریع‌ترین سرور...';
+      status = 'در حال اتصال با سریع‌ترین سرور...';
     });
 
     try {
-      final profile = await _importProfile();
-      if (profile == null) throw Exception('Profile ساخته نشد');
-
+      final profile = importedProfile!;
       final source = File(profile.typed.path);
+      if (!await source.exists()) {
+        importedProfile = null;
+        throw Exception('فایل پروفایل محلی پیدا نشد');
+      }
+
       final target = await profileStorage.getUsingConfig();
       await target.parent.create(recursive: true);
       await source.copy(target.path);
@@ -365,7 +407,7 @@ class _HomePageState extends State<HomePage> {
         connected = true;
         connecting = false;
         if (activeOutbound == null) {
-          status = 'متصل • ${configs.first.address}';
+          status = 'VPN فعال است';
         }
       });
     } catch (e) {
@@ -509,17 +551,15 @@ class _HomePageState extends State<HomePage> {
 
   Widget _serverCard(int index, ServerConfig server) {
     final fastest = index == 1 && server.ping != null;
-    final hashIndex = server.raw.indexOf('#');
-    final name = hashIndex >= 0 && hashIndex + 1 < server.raw.length
-        ? Uri.decodeComponent(server.raw.substring(hashIndex + 1))
-        : server.type.toUpperCase();
+    final name = server.raw.isNotEmpty ? server.raw : server.type.toUpperCase();
+    final endpoint = server.port > 0 ? '${server.address}:${server.port}' : server.address;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
         leading: CircleAvatar(child: Text('$index')),
         title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('${server.type.toUpperCase()} • ${server.address}:${server.port}', maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text('${server.type.toUpperCase()} • $endpoint', maxLines: 1, overflow: TextOverflow.ellipsis),
         trailing: fastest
             ? Text('⚡ ${server.ping} ms', style: const TextStyle(fontWeight: FontWeight.bold))
             : Text(server.ping == null ? '—' : '${server.ping} ms'),
