@@ -116,15 +116,72 @@ jobs:
           ls -lh "$DEST"
           sha256sum "$DEST/libbox-${VERSION}.aar"
 
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Verify V2Box-compatible subscription request profile
+      - name: Fix subscription pipeline and commit source change
         run: |
           set -euo pipefail
-          grep -n "v2Box/10.1.5" lib/main.dart
-          grep -n "HttpClient" lib/main.dart
-          echo 'V2Box-compatible User-Agent and dedicated HttpClient subscription path are present.'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('lib/main.dart')
+          source = path.read_text()
+          pattern = re.compile(
+              r"  /// V2Box-style subscription pipeline:.*?\n  UserInfo\? _parseUserInfo",
+              re.S,
+          )
+          replacement = '''  /// Use the same HTTP stack as flutter_sing_box/V2Box-style clients.
+  ///
+  /// The previous implementation downloaded the whole response with
+  /// dart:io HttpClient and waited for the response stream to finish before
+  /// parsing it. Some subscription panels keep HTTP/1.1 connections alive,
+  /// which can leave that stream waiting until the 30-second timeout even
+  /// though the subscription data is already available. The plugin's Dio
+  /// pipeline handles these responses correctly and also preserves response
+  /// headers such as subscription-userinfo.
+  Future<Profile> _importProfileFromSubscription(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      throw const FormatException('آدرس Subscription معتبر نیست');
+    }
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      throw const FormatException('فقط لینک HTTP/HTTPS برای Subscription پشتیبانی می‌شود');
+    }
+
+    try {
+      return await profileService
+          .importProfile(
+            subscribeLink: uri,
+            userAgent: 'v2Box/10.1.5',
+            autoUpdateInterval: 12,
+          )
+          .timeout(const Duration(seconds: 45));
+    } on TimeoutException {
+      throw TimeoutException('Subscription در 45 ثانیه پاسخ کامل نداد');
+    }
+  }
+
+  UserInfo? _parseUserInfo'''
+          fixed, count = pattern.subn(replacement, source, count=1)
+          if count != 1:
+              raise SystemExit('Could not find the old subscription pipeline in lib/main.dart')
+          path.write_text(fixed)
+          PY
+
+          if ! git diff --quiet -- lib/main.dart; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add lib/main.dart
+            git commit -m 'Fix subscription reader using plugin Dio pipeline'
+            git push origin HEAD:main
+          else
+            echo 'Subscription pipeline already fixed.'
+          fi
+
+          echo '--- subscription pipeline ---'
+          grep -n -A30 -B2 'Future<Profile> _importProfileFromSubscription' lib/main.dart
+
+      - name: Get dependencies
+        run: flutter pub get
 
       - name: Verify local libbox repository
         run: |
@@ -158,4 +215,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-14-v2box-subscription-pipeline
+# Build trigger marker: 2026-09-15-subscription-dio-fix-v1
