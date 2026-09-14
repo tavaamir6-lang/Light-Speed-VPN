@@ -25,18 +25,16 @@ class LightSpeedApp extends StatelessWidget {
   const LightSpeedApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Light speed 🔥',
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        useMaterial3: true,
-        colorSchemeSeed: Colors.deepPurple,
-      ),
-      home: const HomePage(),
-    );
-  }
+  Widget build(BuildContext context) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Light speed 🔥',
+        theme: ThemeData(
+          brightness: Brightness.dark,
+          useMaterial3: true,
+          colorSchemeSeed: Colors.deepPurple,
+        ),
+        home: const HomePage(),
+      );
 }
 
 class ServerConfig {
@@ -87,6 +85,8 @@ class _HomePageState extends State<HomePage> {
 
   StreamSubscription<List<ClientGroup>>? groupSubscription;
   StreamSubscription<ClientStatus>? trafficSubscription;
+  Timer? refreshTimer;
+
   List<ClientGroup> groups = [];
   List<ServerConfig> configs = [];
   SubscriptionInfo? subscription;
@@ -108,15 +108,11 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-
     groupSubscription = vpn.groupStream.listen((value) {
       groups = value;
-      if (mounted) {
-        _syncConfigsFromGroupsIfNeeded();
-        setState(() {});
-      }
+      _syncConfigsFromGroupsIfNeeded();
+      if (mounted) setState(() {});
     });
-
     trafficSubscription = vpn.connectedStatusStream.listen((value) {
       uploadSpeed = value.uplink;
       downloadSpeed = value.downlink;
@@ -124,7 +120,9 @@ class _HomePageState extends State<HomePage> {
       downloadTotal = value.downlinkTotal;
       if (mounted) setState(() {});
     });
-
+    refreshTimer = Timer.periodic(const Duration(minutes: 15), (_) {
+      if (!loading) loadSubscription(autoConnectAfterLoad: false, silent: true);
+    });
     _loadCoreVersion();
     _restoreSettingsAndUrl();
   }
@@ -139,10 +137,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _restoreSettingsAndUrl() async {
     final prefs = await SharedPreferences.getInstance();
     final savedAuto = prefs.getBool('auto_connect');
-    if (savedAuto != null && mounted) {
-      setState(() => autoConnect = savedAuto);
-    }
-
+    if (savedAuto != null && mounted) setState(() => autoConnect = savedAuto);
     final value = prefs.getString('subscription_url');
     if (value != null && value.isNotEmpty) {
       urlController.text = value;
@@ -150,47 +145,143 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// Subscription is deliberately read through flutter_sing_box/ProfileService.
-  /// That path uses the plugin's Dio/NetworkService stack and its subscription
-  /// parser, including Base64 and Clash/YAML conversion. The old raw http.get()
-  /// implementation caused the 30-second TimeoutException shown in the app.
-  Future<void> loadSubscription({bool autoConnectAfterLoad = true}) async {
+  /// V2Box-style subscription pipeline:
+  /// 1) fetch the remote body with a real HttpClient and V2Box-compatible UA;
+  /// 2) preserve subscription-userinfo headers;
+  /// 3) save the response as a local file;
+  /// 4) let flutter_sing_box parse the local file (no second network request).
+  /// This removes the plugin's remote-fetch timeout path that was failing at 30s.
+  Future<Profile> _importProfileFromSubscription(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      throw const FormatException('آدرس Subscription معتبر نیست');
+    }
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      throw const FormatException('فقط لینک HTTP/HTTPS برای Subscription پشتیبانی می‌شود');
+    }
+
+    final client = HttpClient()
+      ..autoUncompress = true
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..idleTimeout = const Duration(seconds: 20)
+      ..maxConnectionsPerHost = 4;
+
+    HttpClientResponse response;
+    try {
+      final request = await client.getUrl(uri).timeout(const Duration(seconds: 10));
+      request.followRedirects = true;
+      request.maxRedirects = 5;
+      request.headers.set('User-Agent', 'v2Box/10.1.5');
+      request.headers.set(
+        'Accept',
+        'application/json, application/yaml;q=0.9, text/plain;q=0.8, */*;q=0.5',
+      );
+      request.headers.set('Cache-Control', 'no-cache');
+      request.headers.set('Pragma', 'no-cache');
+      response = await request.close().timeout(const Duration(seconds: 20));
+    } on TimeoutException {
+      client.close(force: true);
+      throw const TimeoutException('خواندن Subscription بیشتر از زمان مجاز طول کشید');
+    } catch (e) {
+      client.close(force: true);
+      rethrow;
+    }
+
+    try {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          'Subscription HTTP ${response.statusCode} ${response.reasonPhrase ?? ''}'.trim(),
+          uri: uri,
+        );
+      }
+
+      final bodyBytes = await response.fold<List<int>>(<int>[], (a, b) => a..addAll(b));
+      if (bodyBytes.isEmpty) throw const FormatException('Subscription خالی است');
+      final body = utf8.decode(bodyBytes, allowMalformed: true).trim();
+      if (body.isEmpty) throw const FormatException('Subscription خالی است');
+
+      final userInfo = _parseUserInfo(response.headers.value('subscription-userinfo'));
+      final tempFile = File(
+        '${Directory.systemTemp.path}/light_speed_subscription_${DateTime.now().microsecondsSinceEpoch}.txt',
+      );
+      await tempFile.writeAsString(body, flush: true);
+
+      try {
+        // ProfileService sees file:// and parses it locally using the same
+        // Base64/Clash/YAML/native config pipeline used by the plugin.
+        final profile = await profileService.importProfile(
+          subscribeLink: Uri.file(tempFile.path),
+          userAgent: 'v2Box/10.1.5',
+          autoUpdateInterval: 12,
+        );
+        profile.userInfo = userInfo;
+        profileStorage.updateProfile(profile);
+        return profile;
+      } finally {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  UserInfo? _parseUserInfo(String? header) {
+    if (header == null || header.trim().isEmpty) return null;
+    int? value(String key) {
+      for (final part in header.split(';')) {
+        final pieces = part.trim().split('=');
+        if (pieces.length < 2) continue;
+        if (pieces.first.trim().toLowerCase() == key) {
+          return int.tryParse(pieces.sublist(1).join('=').trim());
+        }
+      }
+      return null;
+    }
+    final upload = value('upload');
+    final download = value('download');
+    final total = value('total');
+    final expire = value('expire');
+    if (upload == null && download == null && total == null && expire == null) return null;
+    return UserInfo(upload: upload, download: download, total: total, expire: expire);
+  }
+
+  Future<void> loadSubscription({
+    bool autoConnectAfterLoad = true,
+    bool silent = false,
+  }) async {
     final url = urlController.text.trim();
     if (url.isEmpty) {
       if (mounted) setState(() => status = 'لینک Subscription را وارد کن');
       return;
     }
     if (loading) return;
-
-    setState(() {
-      loading = true;
-      status = 'در حال خواندن Subscription با sing-box...';
-    });
+    if (mounted) {
+      setState(() {
+        loading = true;
+        if (!silent) status = 'در حال خواندن Subscription...';
+      });
+    }
 
     try {
-      final profile = await _importProfile();
+      final profile = await _importProfileFromSubscription(url);
       importedProfile = profile;
-
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('subscription_url', url);
 
       subscription = _subscriptionInfoFromProfile(profile);
       configs = await _readServersFromProfile(profile);
-
-      // Native groups can be emitted shortly after the profile is imported.
       await _waitForNativeGroups();
       _syncConfigsFromGroupsIfNeeded();
 
-      if (!mounted) return;
-      setState(() {
-        loading = false;
-        status = configs.isEmpty
-            ? 'Subscription خوانده شد؛ آماده اتصال است'
-            : '${configs.length} سرور خوانده شد';
-      });
+      if (mounted) {
+        setState(() {
+          loading = false;
+          status = configs.isEmpty ? 'Subscription خوانده شد؛ آماده اتصال است' : '${configs.length} سرور خوانده شد';
+        });
+      }
 
-      // A valid profile is enough to start the VPN. Do not require our
-      // lightweight server parser to understand every Clash/YAML format.
       if (autoConnectAfterLoad && autoConnect && !connected && importedProfile != null) {
         await connectBestServer();
       }
@@ -199,8 +290,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         loading = false;
         connecting = false;
-        importedProfile = null;
-        status = _friendlySubscriptionError(e);
+        if (!silent) status = _friendlySubscriptionError(e);
       });
     }
   }
@@ -208,9 +298,7 @@ class _HomePageState extends State<HomePage> {
   String _friendlySubscriptionError(Object error) {
     final text = error.toString();
     final lower = text.toLowerCase();
-    if (lower.contains('timeoutexception') || lower.contains('connection timeout')) {
-      return 'سرور Subscription پاسخ نداد. دوباره تلاش کن.';
-    }
+    if (lower.contains('timeout')) return 'Subscription پاسخ نداد؛ دوباره تلاش کن.';
     if (lower.contains('socketexception') || lower.contains('failed host lookup')) {
       return 'دسترسی به سرور Subscription برقرار نشد.';
     }
@@ -220,29 +308,15 @@ class _HomePageState extends State<HomePage> {
     return 'خطا در خواندن Subscription: $text';
   }
 
-  Future<Profile> _importProfile() async {
-    final url = urlController.text.trim();
-    if (url.isEmpty) throw Exception('Subscription URL خالی است');
-
-    return profileService.importProfile(
-      subscribeLink: Uri.parse(url),
-      userAgent: 'v2Box/10.1.5',
-      autoUpdateInterval: 12,
-    );
-  }
-
   SubscriptionInfo? _subscriptionInfoFromProfile(Profile profile) {
     try {
-      final dynamic info = profile.userInfo;
+      final info = profile.userInfo;
       if (info == null) return null;
-      final dynamic raw = info.toJson();
-      if (raw is! Map) return null;
-      int value(String key) => int.tryParse('${raw[key] ?? 0}') ?? 0;
       return SubscriptionInfo(
-        upload: value('upload'),
-        download: value('download'),
-        total: value('total'),
-        expire: value('expire'),
+        upload: info.upload ?? 0,
+        download: info.download ?? 0,
+        total: info.total ?? 0,
+        expire: info.expire ?? 0,
       );
     } catch (_) {
       return null;
@@ -258,26 +332,16 @@ class _HomePageState extends State<HomePage> {
       final rawOutbounds = decoded['outbounds'];
       if (rawOutbounds is! List) return [];
 
-      const nodeTypes = {
-        'vless',
-        'vmess',
-        'trojan',
-        'shadowsocks',
-        'ss',
-        'hysteria',
-        'hysteria2',
-        'tuic',
-        'wireguard',
-        'ssh',
-        'naive',
+      const supported = {
+        'vless', 'vmess', 'trojan', 'shadowsocks', 'ss', 'hysteria',
+        'hysteria2', 'tuic', 'wireguard', 'ssh', 'naive', 'anytls',
       };
-
       final result = <ServerConfig>[];
       for (final item in rawOutbounds) {
         if (item is! Map) continue;
         final type = '${item['type'] ?? ''}'.toLowerCase();
         final address = '${item['server'] ?? ''}'.trim();
-        if (!nodeTypes.contains(type) || address.isEmpty) continue;
+        if (!supported.contains(type) || address.isEmpty) continue;
         final port = int.tryParse('${item['server_port'] ?? 443}') ?? 443;
         final tag = '${item['tag'] ?? type}'.trim();
         result.add(ServerConfig(raw: tag, type: type, address: address, port: port));
@@ -291,7 +355,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _waitForNativeGroups() async {
     for (var i = 0; i < 25; i++) {
-      if (groups.any((group) => group.items?.isNotEmpty == true)) return;
+      if (groups.any((g) => g.items?.isNotEmpty == true)) return;
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
   }
@@ -318,31 +382,23 @@ class _HomePageState extends State<HomePage> {
   Future<void> testPings() async {
     if (configs.isEmpty || testing) return;
     setState(() => testing = true);
-
     await Future.wait(configs.map((server) async {
       if (server.port <= 0) return;
       final watch = Stopwatch()..start();
       try {
-        final socket = await Socket.connect(
-          server.address,
-          server.port,
-          timeout: const Duration(seconds: 3),
-        );
+        final socket = await Socket.connect(server.address, server.port, timeout: const Duration(seconds: 3));
         await socket.close();
         server.ping = watch.elapsedMilliseconds;
       } catch (_) {
         server.ping = null;
       }
     }));
-
     configs.sort((a, b) => (a.ping ?? 999999).compareTo(b.ping ?? 999999));
-    if (!mounted) return;
-    setState(() => testing = false);
+    if (mounted) setState(() => testing = false);
   }
 
   Future<void> _runNativeUrlTests() async {
-    final currentGroups = List<ClientGroup>.from(groups);
-    for (final group in currentGroups) {
+    for (final group in List<ClientGroup>.from(groups)) {
       final items = group.items;
       if (items == null || items.isEmpty) continue;
       if (!group.selectable && group.type != 'urltest') continue;
@@ -358,7 +414,6 @@ class _HomePageState extends State<HomePage> {
   Future<void> _selectFastestNativeOutbound() async {
     ClientGroup? bestGroup;
     ClientGroupItem? bestItem;
-
     for (final group in groups) {
       final items = group.items;
       if (items == null || items.isEmpty) continue;
@@ -372,68 +427,44 @@ class _HomePageState extends State<HomePage> {
         }
       }
     }
-
     if (bestGroup == null || bestItem == null) return;
-
-    await vpn.selectOutbound(
-      groupTag: bestGroup.tag,
-      outboundTag: bestItem.tag,
-    );
+    await vpn.selectOutbound(groupTag: bestGroup.tag, outboundTag: bestItem.tag);
     activeOutbound = bestItem.tag;
-
-    if (mounted) {
-      setState(() {
-        status = 'متصل • سریع‌ترین: ${bestItem!.tag} (${bestItem.urlTestDelay} ms)';
-      });
-    }
+    if (mounted) setState(() => status = 'متصل • سریع‌ترین: ${bestItem!.tag} (${bestItem.urlTestDelay} ms)');
   }
 
   Future<void> connectBestServer() async {
     if (connecting || connected) return;
-
     if (importedProfile == null) {
       await loadSubscription(autoConnectAfterLoad: false);
       if (importedProfile == null) return;
     }
-
-    setState(() {
-      connecting = true;
-      status = 'در حال اتصال با سریع‌ترین سرور...';
-    });
+    if (mounted) setState(() { connecting = true; status = 'در حال اتصال با سریع‌ترین سرور...'; });
 
     try {
       final profile = importedProfile!;
       final source = File(profile.typed.path);
-      if (!await source.exists()) {
-        importedProfile = null;
-        throw Exception('فایل پروفایل محلی پیدا نشد');
-      }
-
+      if (!await source.exists()) throw Exception('فایل پروفایل محلی پیدا نشد');
       final target = await profileStorage.getUsingConfig();
       await target.parent.create(recursive: true);
       await source.copy(target.path);
       profileStorage.setSelectedProfile(profile.id);
 
       await vpn.startVpn();
-
-      // startVpn() starts the Android VPN service. Groups are delivered by
-      // the native core shortly after startup, so wait here before url-test.
       await _waitForNativeGroups();
       await _runNativeUrlTests();
       await _selectFastestNativeOutbound();
 
-      if (!mounted) return;
-      setState(() {
-        connected = true;
-        connecting = false;
-        if (activeOutbound == null) status = 'VPN فعال است';
-      });
+      if (mounted) {
+        setState(() {
+          connected = true;
+          connecting = false;
+          if (activeOutbound == null) status = 'VPN فعال است';
+        });
+      }
     } catch (e) {
-      try {
-        await vpn.stopVpn();
-      } catch (_) {}
-      if (!mounted) return;
-      setState(() {
+      try { await vpn.stopVpn(); } catch (_) {}
+      if (mounted) setState(() {
         connecting = false;
         connected = false;
         activeOutbound = null;
@@ -449,25 +480,20 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => status = 'خطای قطع اتصال: $e');
       return;
     }
-    if (mounted) {
-      setState(() {
-        connected = false;
-        activeOutbound = null;
-        uploadSpeed = 0;
-        downloadSpeed = 0;
-        status = 'اتصال قطع شد';
-      });
-    }
+    if (mounted) setState(() {
+      connected = false;
+      activeOutbound = null;
+      uploadSpeed = 0;
+      downloadSpeed = 0;
+      status = 'اتصال قطع شد';
+    });
   }
 
   String _bytes(int bytes) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     double n = bytes.toDouble();
     var i = 0;
-    while (n >= 1024 && i < units.length - 1) {
-      n /= 1024;
-      i++;
-    }
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
     return '${n.toStringAsFixed(i == 0 ? 0 : 1)} ${units[i]}';
   }
 
@@ -479,130 +505,102 @@ class _HomePageState extends State<HomePage> {
   String _remainingDays(int timestamp) {
     if (timestamp <= 0) return 'نامشخص';
     final remaining = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000).difference(DateTime.now()).inDays;
-    if (remaining < 0) return 'منقضی شده';
-    return '$remaining روز';
+    return remaining < 0 ? 'منقضی شده' : '$remaining روز';
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Light speed 🔥', style: TextStyle(fontWeight: FontWeight.bold)),
-        actions: [
-          IconButton(
-            onPressed: loading ? null : loadSubscription,
-            icon: const Icon(Icons.refresh),
-          ),
-        ],
-      ),
-      body: RefreshIndicator(
-        onRefresh: loadSubscription,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            TextField(
-              controller: urlController,
-              keyboardType: TextInputType.url,
-              decoration: InputDecoration(
-                labelText: 'Subscription URL',
-                hintText: 'https://...',
-                prefixIcon: const Icon(Icons.link),
-                suffixIcon: IconButton(
-                  icon: const Icon(Icons.download),
-                  onPressed: loading ? null : loadSubscription,
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          title: const Text('Light speed 🔥', style: TextStyle(fontWeight: FontWeight.bold)),
+          actions: [IconButton(onPressed: loading ? null : loadSubscription, icon: const Icon(Icons.refresh))],
+        ),
+        body: RefreshIndicator(
+          onRefresh: loadSubscription,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              TextField(
+                controller: urlController,
+                keyboardType: TextInputType.url,
+                decoration: InputDecoration(
+                  labelText: 'Subscription URL',
+                  hintText: 'https://...',
+                  prefixIcon: const Icon(Icons.link),
+                  suffixIcon: IconButton(icon: const Icon(Icons.download), onPressed: loading ? null : loadSubscription),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
                 ),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
               ),
-            ),
-            const SizedBox(height: 12),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('اتصال خودکار به سریع‌ترین سرور'),
-              value: autoConnect,
-              onChanged: connected ? null : (value) async {
-                setState(() => autoConnect = value);
-                final prefs = await SharedPreferences.getInstance();
-                await prefs.setBool('auto_connect', value);
-              },
-            ),
-            Text(status, textAlign: TextAlign.center),
-            const SizedBox(height: 8),
-            Text(coreVersion, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: connecting ? null : (connected ? disconnectVpn : connectBestServer),
-              icon: Icon(connected ? Icons.stop_circle : Icons.power_settings_new),
-              label: Text(connected ? 'قطع VPN' : 'اتصال به سریع‌ترین سرور'),
-            ),
-            if (subscription != null) ...[
-              const SizedBox(height: 16),
-              _trafficCard(subscription!),
-            ],
-            if (connected) ...[
               const SizedBox(height: 12),
-              Card(
-                child: Padding(
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('اتصال خودکار به سریع‌ترین سرور'),
+                value: autoConnect,
+                onChanged: connected ? null : (value) async {
+                  setState(() => autoConnect = value);
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setBool('auto_connect', value);
+                },
+              ),
+              Text(status, textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              Text(coreVersion, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: connecting ? null : (connected ? disconnectVpn : connectBestServer),
+                icon: Icon(connected ? Icons.stop_circle : Icons.power_settings_new),
+                label: Text(connected ? 'قطع VPN' : 'اتصال به سریع‌ترین سرور'),
+              ),
+              if (subscription != null) ...[
+                const SizedBox(height: 16),
+                _trafficCard(subscription!),
+              ],
+              if (connected) ...[
+                const SizedBox(height: 12),
+                Card(child: Padding(
                   padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('📡 ترافیک واقعی VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 10),
-                      Text('دانلود: ${_bytes(downloadSpeed)}/s'),
-                      Text('آپلود: ${_bytes(uploadSpeed)}/s'),
-                      Text('دریافت‌شده: ${_bytes(downloadTotal)}'),
-                      Text('ارسال‌شده: ${_bytes(uploadTotal)}'),
-                    ],
-                  ),
-                ),
-              ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('📡 ترافیک واقعی VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Text('دانلود: ${_bytes(downloadSpeed)}/s'),
+                    Text('آپلود: ${_bytes(uploadSpeed)}/s'),
+                    Text('دریافت‌شده: ${_bytes(downloadTotal)}'),
+                    Text('ارسال‌شده: ${_bytes(uploadTotal)}'),
+                  ]),
+                )),
+              ],
+              const SizedBox(height: 16),
+              if (configs.isNotEmpty) Row(children: [
+                const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const Spacer(),
+                if (testing) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
+              ]),
+              ...configs.asMap().entries.map((entry) => _serverCard(entry.key + 1, entry.value)),
             ],
-            const SizedBox(height: 16),
-            if (configs.isNotEmpty)
-              Row(
-                children: [
-                  const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  const Spacer(),
-                  if (testing)
-                    const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-                  IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
-                ],
-              ),
-            ...configs.asMap().entries.map((entry) => _serverCard(entry.key + 1, entry.value)),
-          ],
+          ),
         ),
-      ),
-    );
-  }
+      );
 
-  Widget _trafficCard(SubscriptionInfo info) {
-    return Card(
-      child: Padding(
+  Widget _trafficCard(SubscriptionInfo info) => Card(child: Padding(
         padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
-            const SizedBox(height: 12),
-            Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
-            Text('آپلود: ${_bytes(info.upload)}'),
-            Text('دانلود: ${_bytes(info.download)}'),
-            Text('باقی‌مانده: ${_bytes(info.remaining)}'),
-            Text('انقضا: ${_expire(info.expire)}'),
-            Text('زمان باقی‌مانده: ${_remainingDays(info.expire)}'),
-          ],
-        ),
-      ),
-    );
-  }
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 12),
+          LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
+          const SizedBox(height: 12),
+          Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
+          Text('آپلود: ${_bytes(info.upload)}'),
+          Text('دانلود: ${_bytes(info.download)}'),
+          Text('باقی‌مانده: ${_bytes(info.remaining)}'),
+          Text('انقضا: ${_expire(info.expire)}'),
+          Text('زمان باقی‌مانده: ${_remainingDays(info.expire)}'),
+        ]),
+      ));
 
   Widget _serverCard(int index, ServerConfig server) {
     final fastest = index == 1 && server.ping != null;
     final name = server.raw.isNotEmpty ? server.raw : server.type.toUpperCase();
     final endpoint = server.port > 0 ? '${server.address}:${server.port}' : server.address;
-
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
@@ -618,6 +616,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    refreshTimer?.cancel();
     groupSubscription?.cancel();
     trafficSubscription?.cancel();
     urlController.dispose();
