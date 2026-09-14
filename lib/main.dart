@@ -149,9 +149,13 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// V2Box-style subscription pipeline:
-  /// fetch once with a dedicated HTTP client, preserve subscription headers,
-  /// then pass the downloaded body to the local profile parser.
+  /// Use the plugin's Dio-based subscription downloader, like V2Box-style clients.
+  ///
+  /// The old dart:io HttpClient implementation waited for the whole response
+  /// stream to finish. Some subscription panels keep HTTP connections alive,
+  /// so that stream could sit until the timeout even after the subscription
+  /// data was already available. flutter_sing_box uses Dio and parses the
+  /// response headers/body in its own subscription pipeline.
   Future<Profile> _importProfileFromSubscription(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
@@ -161,72 +165,16 @@ class _HomePageState extends State<HomePage> {
       throw const FormatException('فقط لینک HTTP/HTTPS برای Subscription پشتیبانی می‌شود');
     }
 
-    final client = HttpClient()
-      ..autoUncompress = true
-      ..connectionTimeout = const Duration(seconds: 8)
-      ..idleTimeout = const Duration(seconds: 20)
-      ..maxConnectionsPerHost = 4;
-
-    HttpClientResponse response;
     try {
-      final request = await client.getUrl(uri).timeout(const Duration(seconds: 10));
-      request.followRedirects = true;
-      request.maxRedirects = 5;
-      request.headers.set('User-Agent', 'v2Box/10.1.5');
-      request.headers.set(
-        'Accept',
-        'application/json, application/yaml;q=0.9, text/plain;q=0.8, */*;q=0.5',
-      );
-      request.headers.set('Cache-Control', 'no-cache');
-      request.headers.set('Pragma', 'no-cache');
-      response = await request.close().timeout(const Duration(seconds: 20));
+      return await profileService
+          .importProfile(
+            subscribeLink: uri,
+            userAgent: 'v2Box/10.1.5',
+            autoUpdateInterval: 12,
+          )
+          .timeout(const Duration(seconds: 45));
     } on TimeoutException {
-      client.close(force: true);
-      throw TimeoutException('خواندن Subscription بیشتر از زمان مجاز طول کشید');
-    } catch (e) {
-      client.close(force: true);
-      rethrow;
-    }
-
-    try {
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException(
-          'Subscription HTTP ${response.statusCode} ${response.reasonPhrase}'.trim(),
-          uri: uri,
-        );
-      }
-
-      final bodyBytes = await response.fold<List<int>>(<int>[], (a, b) => a..addAll(b));
-      if (bodyBytes.isEmpty) {
-        throw FormatException('Subscription خالی است');
-      }
-      final body = utf8.decode(bodyBytes, allowMalformed: true).trim();
-      if (body.isEmpty) {
-        throw FormatException('Subscription خالی است');
-      }
-
-      final userInfo = _parseUserInfo(response.headers.value('subscription-userinfo'));
-      final tempFile = File(
-        '${Directory.systemTemp.path}/light_speed_subscription_${DateTime.now().microsecondsSinceEpoch}.txt',
-      );
-      await tempFile.writeAsString(body, flush: true);
-
-      try {
-        final profile = await profileService.importProfile(
-          subscribeLink: Uri.file(tempFile.path),
-          userAgent: 'v2Box/10.1.5',
-          autoUpdateInterval: 12,
-        );
-        profile.userInfo = userInfo;
-        profileStorage.updateProfile(profile);
-        return profile;
-      } finally {
-        try {
-          await tempFile.delete();
-        } catch (_) {}
-      }
-    } finally {
-      client.close(force: true);
+      throw TimeoutException('Subscription در 45 ثانیه پاسخ کامل نداد');
     }
   }
 
