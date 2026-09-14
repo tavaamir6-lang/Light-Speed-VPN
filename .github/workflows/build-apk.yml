@@ -119,6 +119,28 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Match V2Box subscription request profile
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/main.dart')
+          s = p.read_text()
+          old = "userAgent: 'LightSpeed/1.0',"
+          new = "userAgent: 'v2Box/10.1.5',"
+          if old not in s:
+              raise SystemExit('Expected LightSpeed subscription User-Agent was not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          grep -n "userAgent:" lib/main.dart
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/main.dart
+          if ! git diff --cached --quiet; then
+            git commit -m "fix: use V2Box-compatible subscription user agent [skip ci]"
+            git push
+          fi
+
       - name: Verify local libbox repository
         run: |
           set -euo pipefail
@@ -151,4 +173,4 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
-# Build trigger marker: 2026-09-11-native-profile-import-v2
+# Build trigger marker: 2026-09-14-v2box-ua-fix
