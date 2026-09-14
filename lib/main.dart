@@ -86,6 +86,7 @@ class _HomePageState extends State<HomePage> {
   final ProfileStorage profileStorage = ProfileStorage();
 
   StreamSubscription<List<ClientGroup>>? groupSubscription;
+  StreamSubscription<ClientStatus>? trafficSubscription;
   List<ClientGroup> groups = [];
   List<ServerConfig> configs = [];
   SubscriptionInfo? subscription;
@@ -99,10 +100,15 @@ class _HomePageState extends State<HomePage> {
   String status = 'لینک Subscription را وارد کن';
   String coreVersion = 'sing-box';
   String? activeOutbound;
+  int uploadSpeed = 0;
+  int downloadSpeed = 0;
+  int uploadTotal = 0;
+  int downloadTotal = 0;
 
   @override
   void initState() {
     super.initState();
+
     groupSubscription = vpn.groupStream.listen((value) {
       groups = value;
       if (mounted) {
@@ -110,8 +116,17 @@ class _HomePageState extends State<HomePage> {
         setState(() {});
       }
     });
+
+    trafficSubscription = vpn.connectedStatusStream.listen((value) {
+      uploadSpeed = value.uplink;
+      downloadSpeed = value.downlink;
+      uploadTotal = value.uplinkTotal;
+      downloadTotal = value.downlinkTotal;
+      if (mounted) setState(() {});
+    });
+
     _loadCoreVersion();
-    _restoreUrl();
+    _restoreSettingsAndUrl();
   }
 
   Future<void> _loadCoreVersion() async {
@@ -121,8 +136,13 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
   }
 
-  Future<void> _restoreUrl() async {
+  Future<void> _restoreSettingsAndUrl() async {
     final prefs = await SharedPreferences.getInstance();
+    final savedAuto = prefs.getBool('auto_connect');
+    if (savedAuto != null && mounted) {
+      setState(() => autoConnect = savedAuto);
+    }
+
     final value = prefs.getString('subscription_url');
     if (value != null && value.isNotEmpty) {
       urlController.text = value;
@@ -130,21 +150,16 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// New subscription architecture:
-  /// 1) Do NOT download the subscription with a separate Flutter http client.
-  /// 2) Let flutter_sing_box/ProfileService handle the remote subscription.
-  /// 3) Read the normalized local sing-box JSON produced by the plugin.
-  /// 4) Use the native sing-box groups/url-test for server selection.
-  /// This is the important difference from the old implementation: a 30s
-  /// Flutter HTTP timeout can no longer prevent the native profile importer
-  /// from reading the subscription.
+  /// Subscription is deliberately read through flutter_sing_box/ProfileService.
+  /// That path uses the plugin's Dio/NetworkService stack and its subscription
+  /// parser, including Base64 and Clash/YAML conversion. The old raw http.get()
+  /// implementation caused the 30-second TimeoutException shown in the app.
   Future<void> loadSubscription({bool autoConnectAfterLoad = true}) async {
     final url = urlController.text.trim();
     if (url.isEmpty) {
       if (mounted) setState(() => status = 'لینک Subscription را وارد کن');
       return;
     }
-
     if (loading) return;
 
     setState(() {
@@ -162,7 +177,7 @@ class _HomePageState extends State<HomePage> {
       subscription = _subscriptionInfoFromProfile(profile);
       configs = await _readServersFromProfile(profile);
 
-      // The native group stream can arrive just after importProfile returns.
+      // Native groups can be emitted shortly after the profile is imported.
       await _waitForNativeGroups();
       _syncConfigsFromGroupsIfNeeded();
 
@@ -170,11 +185,13 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         loading = false;
         status = configs.isEmpty
-            ? 'Subscription خوانده شد ولی سروری پیدا نشد'
+            ? 'Subscription خوانده شد؛ آماده اتصال است'
             : '${configs.length} سرور خوانده شد';
       });
 
-      if (autoConnectAfterLoad && autoConnect && !connected && configs.isNotEmpty) {
+      // A valid profile is enough to start the VPN. Do not require our
+      // lightweight server parser to understand every Clash/YAML format.
+      if (autoConnectAfterLoad && autoConnect && !connected && importedProfile != null) {
         await connectBestServer();
       }
     } catch (e) {
@@ -182,18 +199,31 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         loading = false;
         connecting = false;
-        status = 'خطا در خواندن Subscription: $e';
+        importedProfile = null;
+        status = _friendlySubscriptionError(e);
       });
     }
   }
 
-  Future<Profile?> _importProfile() async {
+  String _friendlySubscriptionError(Object error) {
+    final text = error.toString();
+    final lower = text.toLowerCase();
+    if (lower.contains('timeoutexception') || lower.contains('connection timeout')) {
+      return 'سرور Subscription پاسخ نداد. دوباره تلاش کن.';
+    }
+    if (lower.contains('socketexception') || lower.contains('failed host lookup')) {
+      return 'دسترسی به سرور Subscription برقرار نشد.';
+    }
+    if (lower.contains('certificate') || lower.contains('handshake')) {
+      return 'خطای گواهی HTTPS سرور Subscription.';
+    }
+    return 'خطا در خواندن Subscription: $text';
+  }
+
+  Future<Profile> _importProfile() async {
     final url = urlController.text.trim();
     if (url.isEmpty) throw Exception('Subscription URL خالی است');
 
-    // ProfileService uses the plugin's NetworkService/Dio stack instead of
-    // the old raw http.get() path. It also handles remote profile parsing,
-    // Base64 subscriptions and normalization into sing-box configuration.
     return profileService.importProfile(
       subscribeLink: Uri.parse(url),
       userAgent: 'LightSpeed/1.0',
@@ -205,10 +235,8 @@ class _HomePageState extends State<HomePage> {
     try {
       final dynamic info = profile.userInfo;
       if (info == null) return null;
-
       final dynamic raw = info.toJson();
       if (raw is! Map) return null;
-
       int value(String key) => int.tryParse('${raw[key] ?? 0}') ?? 0;
       return SubscriptionInfo(
         upload: value('upload'),
@@ -225,7 +253,6 @@ class _HomePageState extends State<HomePage> {
     try {
       final file = File(profile.typed.path);
       if (!await file.exists()) return [];
-
       final decoded = jsonDecode(await file.readAsString());
       if (decoded is! Map) return [];
       final rawOutbounds = decoded['outbounds'];
@@ -248,21 +275,13 @@ class _HomePageState extends State<HomePage> {
       final result = <ServerConfig>[];
       for (final item in rawOutbounds) {
         if (item is! Map) continue;
-
         final type = '${item['type'] ?? ''}'.toLowerCase();
         final address = '${item['server'] ?? ''}'.trim();
         if (!nodeTypes.contains(type) || address.isEmpty) continue;
-
         final port = int.tryParse('${item['server_port'] ?? 443}') ?? 443;
         final tag = '${item['tag'] ?? type}'.trim();
-        result.add(ServerConfig(
-          raw: tag,
-          type: type,
-          address: address,
-          port: port,
-        ));
+        result.add(ServerConfig(raw: tag, type: type, address: address, port: port));
       }
-
       return result;
     } catch (e) {
       debugPrint('Reading normalized profile failed: $e');
@@ -279,7 +298,6 @@ class _HomePageState extends State<HomePage> {
 
   void _syncConfigsFromGroupsIfNeeded() {
     if (configs.isNotEmpty || groups.isEmpty) return;
-
     final result = <ServerConfig>[];
     for (final group in groups) {
       final items = group.items;
@@ -301,9 +319,6 @@ class _HomePageState extends State<HomePage> {
     if (configs.isEmpty || testing) return;
     setState(() => testing = true);
 
-    // This is only a lightweight reachability indicator for the UI.
-    // Actual proxy quality is measured by native sing-box urlTest after VPN
-    // startup, which is what is used for the real fastest-server decision.
     await Future.wait(configs.map((server) async {
       if (server.port <= 0) return;
       final watch = Stopwatch()..start();
@@ -328,7 +343,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _runNativeUrlTests() async {
     final currentGroups = List<ClientGroup>.from(groups);
     for (final group in currentGroups) {
-      if (group.items == null || group.items!.isEmpty) continue;
+      final items = group.items;
+      if (items == null || items.isEmpty) continue;
       if (!group.selectable && group.type != 'urltest') continue;
       try {
         await vpn.urlTest(groupTag: group.tag);
@@ -345,7 +361,8 @@ class _HomePageState extends State<HomePage> {
 
     for (final group in groups) {
       final items = group.items;
-      if (items == null || items.isEmpty || !group.selectable) continue;
+      if (items == null || items.isEmpty) continue;
+      if (!group.selectable && group.type != 'urltest') continue;
       for (final item in items) {
         final delay = item.urlTestDelay;
         if (delay <= 0) continue;
@@ -374,9 +391,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> connectBestServer() async {
     if (connecting || connected) return;
 
-    if (importedProfile == null || configs.isEmpty) {
+    if (importedProfile == null) {
       await loadSubscription(autoConnectAfterLoad: false);
-      if (importedProfile == null || configs.isEmpty) return;
+      if (importedProfile == null) return;
     }
 
     setState(() {
@@ -398,7 +415,10 @@ class _HomePageState extends State<HomePage> {
       profileStorage.setSelectedProfile(profile.id);
 
       await vpn.startVpn();
-      await Future<void>.delayed(const Duration(seconds: 2));
+
+      // startVpn() starts the Android VPN service. Groups are delivered by
+      // the native core shortly after startup, so wait here before url-test.
+      await _waitForNativeGroups();
       await _runNativeUrlTests();
       await _selectFastestNativeOutbound();
 
@@ -406,9 +426,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connected = true;
         connecting = false;
-        if (activeOutbound == null) {
-          status = 'VPN فعال است';
-        }
+        if (activeOutbound == null) status = 'VPN فعال است';
       });
     } catch (e) {
       try {
@@ -435,6 +453,8 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connected = false;
         activeOutbound = null;
+        uploadSpeed = 0;
+        downloadSpeed = 0;
         status = 'اتصال قطع شد';
       });
     }
@@ -453,9 +473,14 @@ class _HomePageState extends State<HomePage> {
 
   String _expire(int timestamp) {
     if (timestamp <= 0) return 'نامشخص';
-    return DateFormat('yyyy/MM/dd').format(
-      DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
-    );
+    return DateFormat('yyyy/MM/dd').format(DateTime.fromMillisecondsSinceEpoch(timestamp * 1000));
+  }
+
+  String _remainingDays(int timestamp) {
+    if (timestamp <= 0) return 'نامشخص';
+    final remaining = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000).difference(DateTime.now()).inDays;
+    if (remaining < 0) return 'منقضی شده';
+    return '$remaining روز';
   }
 
   @override
@@ -494,7 +519,11 @@ class _HomePageState extends State<HomePage> {
               contentPadding: EdgeInsets.zero,
               title: const Text('اتصال خودکار به سریع‌ترین سرور'),
               value: autoConnect,
-              onChanged: connected ? null : (value) => setState(() => autoConnect = value),
+              onChanged: connected ? null : (value) async {
+                setState(() => autoConnect = value);
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setBool('auto_connect', value);
+              },
             ),
             Text(status, textAlign: TextAlign.center),
             const SizedBox(height: 8),
@@ -508,6 +537,25 @@ class _HomePageState extends State<HomePage> {
             if (subscription != null) ...[
               const SizedBox(height: 16),
               _trafficCard(subscription!),
+            ],
+            if (connected) ...[
+              const SizedBox(height: 12),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('📡 ترافیک واقعی VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 10),
+                      Text('دانلود: ${_bytes(downloadSpeed)}/s'),
+                      Text('آپلود: ${_bytes(uploadSpeed)}/s'),
+                      Text('دریافت‌شده: ${_bytes(downloadTotal)}'),
+                      Text('ارسال‌شده: ${_bytes(uploadTotal)}'),
+                    ],
+                  ),
+                ),
+              ),
             ],
             const SizedBox(height: 16),
             if (configs.isNotEmpty)
@@ -543,6 +591,7 @@ class _HomePageState extends State<HomePage> {
             Text('دانلود: ${_bytes(info.download)}'),
             Text('باقی‌مانده: ${_bytes(info.remaining)}'),
             Text('انقضا: ${_expire(info.expire)}'),
+            Text('زمان باقی‌مانده: ${_remainingDays(info.expire)}'),
           ],
         ),
       ),
@@ -570,6 +619,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     groupSubscription?.cancel();
+    trafficSubscription?.cancel();
     urlController.dispose();
     super.dispose();
   }
