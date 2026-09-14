@@ -3,11 +3,12 @@ import re
 
 path = Path("lib/main.dart")
 source = path.read_text()
-pattern = re.compile(
+
+old_pipeline = re.compile(
     r"  /// V2Box-style subscription pipeline:.*?\n  UserInfo\? _parseUserInfo",
     re.S,
 )
-replacement = '''  /// Use the plugin's Dio-based subscription downloader, like V2Box-style clients.
+new_pipeline = '''  /// Use the plugin's Dio-based subscription downloader, like V2Box-style clients.
   ///
   /// The old dart:io HttpClient implementation waited for the whole response
   /// stream to finish. Some subscription panels keep HTTP connections alive,
@@ -36,11 +37,20 @@ replacement = '''  /// Use the plugin's Dio-based subscription downloader, like 
     }
   }
 
-  UserInfo? _parseUserInfo'''
+'''
 
-fixed, count = pattern.subn(replacement, source, count=1)
-if count != 1:
-    raise SystemExit("Could not find the old subscription pipeline in lib/main.dart")
+fixed, count = old_pipeline.subn(new_pipeline, source, count=1)
+if count == 0 and "Future<Profile> _importProfileFromSubscription" not in source:
+    raise SystemExit("Could not find the subscription pipeline in lib/main.dart")
+
+# Remove the now-unused manual subscription-userinfo parser if it still exists.
+fixed, _ = re.subn(
+    r"  UserInfo\? _parseUserInfo\(String\? header\) \{.*?\n  \}\n\n",
+    "",
+    fixed,
+    count=1,
+    flags=re.S,
+)
 
 path.write_text(fixed)
-print("Subscription pipeline patched successfully.")
+print("Subscription pipeline patched successfully and unused parser removed.")
