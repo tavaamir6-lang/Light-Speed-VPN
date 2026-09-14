@@ -121,7 +121,9 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() {});
     });
     refreshTimer = Timer.periodic(const Duration(minutes: 15), (_) {
-      if (!loading) loadSubscription(autoConnectAfterLoad: false, silent: true);
+      if (!loading) {
+        loadSubscription(autoConnectAfterLoad: false, silent: true);
+      }
     });
     _loadCoreVersion();
     _restoreSettingsAndUrl();
@@ -137,7 +139,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> _restoreSettingsAndUrl() async {
     final prefs = await SharedPreferences.getInstance();
     final savedAuto = prefs.getBool('auto_connect');
-    if (savedAuto != null && mounted) setState(() => autoConnect = savedAuto);
+    if (savedAuto != null && mounted) {
+      setState(() => autoConnect = savedAuto);
+    }
     final value = prefs.getString('subscription_url');
     if (value != null && value.isNotEmpty) {
       urlController.text = value;
@@ -146,11 +150,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// V2Box-style subscription pipeline:
-  /// 1) fetch the remote body with a real HttpClient and V2Box-compatible UA;
-  /// 2) preserve subscription-userinfo headers;
-  /// 3) save the response as a local file;
-  /// 4) let flutter_sing_box parse the local file (no second network request).
-  /// This removes the plugin's remote-fetch timeout path that was failing at 30s.
+  /// fetch once with a dedicated HTTP client, preserve subscription headers,
+  /// then pass the downloaded body to the local profile parser.
   Future<Profile> _importProfileFromSubscription(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
@@ -181,7 +182,7 @@ class _HomePageState extends State<HomePage> {
       response = await request.close().timeout(const Duration(seconds: 20));
     } on TimeoutException {
       client.close(force: true);
-      throw const TimeoutException('خواندن Subscription بیشتر از زمان مجاز طول کشید');
+      throw TimeoutException('خواندن Subscription بیشتر از زمان مجاز طول کشید');
     } catch (e) {
       client.close(force: true);
       rethrow;
@@ -190,15 +191,19 @@ class _HomePageState extends State<HomePage> {
     try {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException(
-          'Subscription HTTP ${response.statusCode} ${response.reasonPhrase ?? ''}'.trim(),
+          'Subscription HTTP ${response.statusCode} ${response.reasonPhrase}'.trim(),
           uri: uri,
         );
       }
 
       final bodyBytes = await response.fold<List<int>>(<int>[], (a, b) => a..addAll(b));
-      if (bodyBytes.isEmpty) throw const FormatException('Subscription خالی است');
+      if (bodyBytes.isEmpty) {
+        throw FormatException('Subscription خالی است');
+      }
       final body = utf8.decode(bodyBytes, allowMalformed: true).trim();
-      if (body.isEmpty) throw const FormatException('Subscription خالی است');
+      if (body.isEmpty) {
+        throw FormatException('Subscription خالی است');
+      }
 
       final userInfo = _parseUserInfo(response.headers.value('subscription-userinfo'));
       final tempFile = File(
@@ -207,8 +212,6 @@ class _HomePageState extends State<HomePage> {
       await tempFile.writeAsString(body, flush: true);
 
       try {
-        // ProfileService sees file:// and parses it locally using the same
-        // Base64/Clash/YAML/native config pipeline used by the plugin.
         final profile = await profileService.importProfile(
           subscribeLink: Uri.file(tempFile.path),
           userAgent: 'v2Box/10.1.5',
@@ -229,6 +232,7 @@ class _HomePageState extends State<HomePage> {
 
   UserInfo? _parseUserInfo(String? header) {
     if (header == null || header.trim().isEmpty) return null;
+
     int? value(String key) {
       for (final part in header.split(';')) {
         final pieces = part.trim().split('=');
@@ -239,6 +243,7 @@ class _HomePageState extends State<HomePage> {
       }
       return null;
     }
+
     final upload = value('upload');
     final download = value('download');
     final total = value('total');
@@ -269,7 +274,6 @@ class _HomePageState extends State<HomePage> {
       importedProfile = profile;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('subscription_url', url);
-
       subscription = _subscriptionInfoFromProfile(profile);
       configs = await _readServersFromProfile(profile);
       await _waitForNativeGroups();
@@ -278,7 +282,9 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         setState(() {
           loading = false;
-          status = configs.isEmpty ? 'Subscription خوانده شد؛ آماده اتصال است' : '${configs.length} سرور خوانده شد';
+          status = configs.isEmpty
+              ? 'Subscription خوانده شد؛ آماده اتصال است'
+              : '${configs.length} سرور خوانده شد';
         });
       }
 
@@ -309,18 +315,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   SubscriptionInfo? _subscriptionInfoFromProfile(Profile profile) {
-    try {
-      final info = profile.userInfo;
-      if (info == null) return null;
-      return SubscriptionInfo(
-        upload: info.upload ?? 0,
-        download: info.download ?? 0,
-        total: info.total ?? 0,
-        expire: info.expire ?? 0,
-      );
-    } catch (_) {
-      return null;
-    }
+    final info = profile.userInfo;
+    if (info == null) return null;
+    return SubscriptionInfo(
+      upload: info.upload ?? 0,
+      download: info.download ?? 0,
+      total: info.total ?? 0,
+      expire: info.expire ?? 0,
+    );
   }
 
   Future<List<ServerConfig>> _readServersFromProfile(Profile profile) async {
@@ -430,7 +432,9 @@ class _HomePageState extends State<HomePage> {
     if (bestGroup == null || bestItem == null) return;
     await vpn.selectOutbound(groupTag: bestGroup.tag, outboundTag: bestItem.tag);
     activeOutbound = bestItem.tag;
-    if (mounted) setState(() => status = 'متصل • سریع‌ترین: ${bestItem!.tag} (${bestItem.urlTestDelay} ms)');
+    if (mounted) {
+      setState(() => status = 'متصل • سریع‌ترین: ${bestItem!.tag} (${bestItem.urlTestDelay} ms)');
+    }
   }
 
   Future<void> connectBestServer() async {
@@ -439,7 +443,12 @@ class _HomePageState extends State<HomePage> {
       await loadSubscription(autoConnectAfterLoad: false);
       if (importedProfile == null) return;
     }
-    if (mounted) setState(() { connecting = true; status = 'در حال اتصال با سریع‌ترین سرور...'; });
+    if (mounted) {
+      setState(() {
+        connecting = true;
+        status = 'در حال اتصال با سریع‌ترین سرور...';
+      });
+    }
 
     try {
       final profile = importedProfile!;
@@ -463,13 +472,17 @@ class _HomePageState extends State<HomePage> {
         });
       }
     } catch (e) {
-      try { await vpn.stopVpn(); } catch (_) {}
-      if (mounted) setState(() {
-        connecting = false;
-        connected = false;
-        activeOutbound = null;
-        status = 'خطای اتصال: $e';
-      });
+      try {
+        await vpn.stopVpn();
+      } catch (_) {}
+      if (mounted) {
+        setState(() {
+          connecting = false;
+          connected = false;
+          activeOutbound = null;
+          status = 'خطای اتصال: $e';
+        });
+      }
     }
   }
 
@@ -480,20 +493,25 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => status = 'خطای قطع اتصال: $e');
       return;
     }
-    if (mounted) setState(() {
-      connected = false;
-      activeOutbound = null;
-      uploadSpeed = 0;
-      downloadSpeed = 0;
-      status = 'اتصال قطع شد';
-    });
+    if (mounted) {
+      setState(() {
+        connected = false;
+        activeOutbound = null;
+        uploadSpeed = 0;
+        downloadSpeed = 0;
+        status = 'اتصال قطع شد';
+      });
+    }
   }
 
   String _bytes(int bytes) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     double n = bytes.toDouble();
     var i = 0;
-    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
     return '${n.toStringAsFixed(i == 0 ? 0 : 1)} ${units[i]}';
   }
 
@@ -512,7 +530,9 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
           title: const Text('Light speed 🔥', style: TextStyle(fontWeight: FontWeight.bold)),
-          actions: [IconButton(onPressed: loading ? null : loadSubscription, icon: const Icon(Icons.refresh))],
+          actions: [
+            IconButton(onPressed: loading ? null : loadSubscription, icon: const Icon(Icons.refresh)),
+          ],
         ),
         body: RefreshIndicator(
           onRefresh: loadSubscription,
@@ -526,7 +546,10 @@ class _HomePageState extends State<HomePage> {
                   labelText: 'Subscription URL',
                   hintText: 'https://...',
                   prefixIcon: const Icon(Icons.link),
-                  suffixIcon: IconButton(icon: const Icon(Icons.download), onPressed: loading ? null : loadSubscription),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.download),
+                    onPressed: loading ? null : loadSubscription,
+                  ),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(18)),
                 ),
               ),
@@ -556,46 +579,53 @@ class _HomePageState extends State<HomePage> {
               ],
               if (connected) ...[
                 const SizedBox(height: 12),
-                Card(child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    const Text('📡 ترافیک واقعی VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 10),
-                    Text('دانلود: ${_bytes(downloadSpeed)}/s'),
-                    Text('آپلود: ${_bytes(uploadSpeed)}/s'),
-                    Text('دریافت‌شده: ${_bytes(downloadTotal)}'),
-                    Text('ارسال‌شده: ${_bytes(uploadTotal)}'),
-                  ]),
-                )),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('📡 ترافیک واقعی VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 10),
+                      Text('دانلود: ${_bytes(downloadSpeed)}/s'),
+                      Text('آپلود: ${_bytes(uploadSpeed)}/s'),
+                      Text('دریافت‌شده: ${_bytes(downloadTotal)}'),
+                      Text('ارسال‌شده: ${_bytes(uploadTotal)}'),
+                    ]),
+                  ),
+                ),
               ],
               const SizedBox(height: 16),
-              if (configs.isNotEmpty) Row(children: [
-                const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                const Spacer(),
-                if (testing) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-                IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
-              ]),
+              if (configs.isNotEmpty)
+                Row(
+                  children: [
+                    const Text('سرورها', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    if (testing) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                    IconButton(onPressed: testing ? null : testPings, icon: const Icon(Icons.speed)),
+                  ],
+                ),
               ...configs.asMap().entries.map((entry) => _serverCard(entry.key + 1, entry.value)),
             ],
           ),
         ),
       );
 
-  Widget _trafficCard(SubscriptionInfo info) => Card(child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 12),
-          LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
-          const SizedBox(height: 12),
-          Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
-          Text('آپلود: ${_bytes(info.upload)}'),
-          Text('دانلود: ${_bytes(info.download)}'),
-          Text('باقی‌مانده: ${_bytes(info.remaining)}'),
-          Text('انقضا: ${_expire(info.expire)}'),
-          Text('زمان باقی‌مانده: ${_remainingDays(info.expire)}'),
-        ]),
-      ));
+  Widget _trafficCard(SubscriptionInfo info) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('📊 اطلاعات اشتراک', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            LinearProgressIndicator(value: info.progress, minHeight: 8, borderRadius: BorderRadius.circular(8)),
+            const SizedBox(height: 12),
+            Text('مصرف: ${_bytes(info.used)} / ${_bytes(info.total)}'),
+            Text('آپلود: ${_bytes(info.upload)}'),
+            Text('دانلود: ${_bytes(info.download)}'),
+            Text('باقی‌مانده: ${_bytes(info.remaining)}'),
+            Text('انقضا: ${_expire(info.expire)}'),
+            Text('زمان باقی‌مانده: ${_remainingDays(info.expire)}'),
+          ]),
+        ),
+      );
 
   Widget _serverCard(int index, ServerConfig server) {
     final fastest = index == 1 && server.ping != null;
