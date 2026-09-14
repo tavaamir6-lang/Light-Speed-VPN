@@ -178,28 +178,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  UserInfo? _parseUserInfo(String? header) {
-    if (header == null || header.trim().isEmpty) return null;
-
-    int? value(String key) {
-      for (final part in header.split(';')) {
-        final pieces = part.trim().split('=');
-        if (pieces.length < 2) continue;
-        if (pieces.first.trim().toLowerCase() == key) {
-          return int.tryParse(pieces.sublist(1).join('=').trim());
-        }
-      }
-      return null;
-    }
-
-    final upload = value('upload');
-    final download = value('download');
-    final total = value('total');
-    final expire = value('expire');
-    if (upload == null && download == null && total == null && expire == null) return null;
-    return UserInfo(upload: upload, download: download, total: total, expire: expire);
-  }
-
   Future<void> loadSubscription({
     bool autoConnectAfterLoad = true,
     bool silent = false,
