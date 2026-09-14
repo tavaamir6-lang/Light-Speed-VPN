@@ -226,7 +226,7 @@ class _HomePageState extends State<HomePage> {
 
     return profileService.importProfile(
       subscribeLink: Uri.parse(url),
-      userAgent: 'LightSpeed/1.0',
+      userAgent: 'v2Box/10.1.5',
       autoUpdateInterval: 12,
     );
   }
