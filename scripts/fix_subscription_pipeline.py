@@ -52,5 +52,11 @@ fixed, _ = re.subn(
     flags=re.S,
 )
 
+# Android's unprivileged VpnService TUN implementation does not implement
+# sing-box strict_route. auto_route + auto_detect_interface provide the
+# relevant system-wide routing and loop-prevention behavior here.
+fixed = fixed.replace("        'strict_route': true,\n", "")
+fixed = fixed.replace("          inbound['strict_route'] = true;\n", "")
+
 path.write_text(fixed)
-print("Subscription pipeline patched successfully and unused parser removed.")
+print("Subscription pipeline patched and Android TUN routing aligned with supported options.")
