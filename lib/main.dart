@@ -468,7 +468,10 @@ class _HomePageState extends State<HomePage> {
         'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
         'mtu': 1500,
         'dns_mode': 'hijack',
-        'stack': 'system',
+        'sniff': true,
+        'sniff_override_destination': false,
+        'endpoint_independent_nat': true,
+        'stack': 'gvisor',
         'auto_route': true,
       });
     } else {
@@ -476,8 +479,11 @@ class _HomePageState extends State<HomePage> {
         if ('${inbound['type'] ?? ''}' == 'tun') {
           inbound['auto_route'] = true;
           inbound['mtu'] = 1500;
-          inbound['stack'] ??= 'system';
-          inbound['dns_mode'] ??= 'hijack';
+          inbound['stack'] = 'gvisor';
+          inbound['dns_mode'] = 'hijack';
+          inbound['sniff'] = true;
+          inbound['sniff_override_destination'] = false;
+          inbound['endpoint_independent_nat'] = true;
           inbound['address'] ??= ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'];
         }
       }
@@ -501,11 +507,19 @@ class _HomePageState extends State<HomePage> {
     if (!config.containsKey('dns')) {
       config['dns'] = {
         'servers': [
-          {'tag': 'system', 'type': 'local'},
+          {
+            'tag': 'remote',
+            'type': 'https',
+            'server': '1.1.1.1',
+            'server_port': 443,
+            'path': '/dns-query',
+            'detour': finalTag,
+          },
         ],
         'rules': [
-          {'action': 'route', 'server': 'system'},
+          {'action': 'route', 'server': 'remote'},
         ],
+        'final': 'remote',
         'strategy': 'prefer_ipv4',
       };
     }
