@@ -85,6 +85,7 @@ class _HomePageState extends State<HomePage> {
 
   StreamSubscription<List<ClientGroup>>? groupSubscription;
   StreamSubscription<ClientStatus>? trafficSubscription;
+  StreamSubscription<List<ClientLog>>? logSubscription;
   Timer? refreshTimer;
 
   List<ClientGroup> groups = [];
@@ -120,6 +121,13 @@ class _HomePageState extends State<HomePage> {
       downloadTotal = value.downlinkTotal;
       if (mounted) setState(() {});
     });
+    logSubscription = vpn.logStream.listen((logs) {
+      for (final log in logs) {
+        if (log.level <= 2 && mounted) {
+          setState(() => status = 'sing-box: ${log.message}');
+        }
+      }
+    });
     refreshTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       if (!loading) {
         loadSubscription(autoConnectAfterLoad: false, silent: true);
@@ -149,13 +157,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// Use the plugin's Dio-based subscription downloader, like V2Box-style clients.
-  ///
-  /// The old dart:io HttpClient implementation waited for the whole response
-  /// stream to finish. Some subscription panels keep HTTP connections alive,
-  /// so that stream could sit until the timeout even after the subscription
-  /// data was already available. flutter_sing_box uses Dio and parses the
-  /// response headers/body in its own subscription pipeline.
   Future<Profile> _importProfileFromSubscription(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
@@ -222,7 +223,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         loading = false;
         connecting = false;
-        if (!silent) status = _friendlySubscriptionError(e);
+        status = _friendlySubscriptionError(e);
       });
     }
   }
@@ -261,8 +262,18 @@ class _HomePageState extends State<HomePage> {
       if (rawOutbounds is! List) return [];
 
       const supported = {
-        'vless', 'vmess', 'trojan', 'shadowsocks', 'ss', 'hysteria',
-        'hysteria2', 'tuic', 'wireguard', 'ssh', 'naive', 'anytls',
+        'vless',
+        'vmess',
+        'trojan',
+        'shadowsocks',
+        'ss',
+        'hysteria',
+        'hysteria2',
+        'tuic',
+        'wireguard',
+        'ssh',
+        'naive',
+        'anytls',
       };
       final result = <ServerConfig>[];
       for (final item in rawOutbounds) {
@@ -314,7 +325,11 @@ class _HomePageState extends State<HomePage> {
       if (server.port <= 0) return;
       final watch = Stopwatch()..start();
       try {
-        final socket = await Socket.connect(server.address, server.port, timeout: const Duration(seconds: 3));
+        final socket = await Socket.connect(
+          server.address,
+          server.port,
+          timeout: const Duration(seconds: 3),
+        );
         await socket.close();
         server.ping = watch.elapsedMilliseconds;
       } catch (_) {
@@ -363,6 +378,146 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _prepareFullDeviceVpnConfig(File target) async {
+    final raw = await target.readAsString();
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('Config sing-box معتبر نیست');
+    }
+    final config = Map<String, dynamic>.from(decoded as Map);
+
+    final outbounds = <Map<String, dynamic>>[];
+    final sourceOutbounds = config['outbounds'];
+    if (sourceOutbounds is List) {
+      for (final item in sourceOutbounds) {
+        if (item is Map) {
+          outbounds.add(Map<String, dynamic>.from(item));
+        }
+      }
+    }
+    if (outbounds.isEmpty) {
+      throw const FormatException('هیچ outbound قابل استفاده‌ای در Subscription نیست');
+    }
+
+    bool hasDirect = outbounds.any((o) => '${o['tag'] ?? ''}' == 'direct' || '${o['type'] ?? ''}' == 'direct');
+    if (!hasDirect) {
+      outbounds.add({'tag': 'direct', 'type': 'direct'});
+      hasDirect = true;
+    }
+
+    final tags = outbounds.map((o) => '${o['tag'] ?? ''}').where((t) => t.isNotEmpty).toSet();
+    final proxyCandidates = outbounds
+        .where((o) => '${o['type'] ?? ''}' != 'direct')
+        .map((o) => '${o['tag'] ?? ''}')
+        .where((t) => t.isNotEmpty)
+        .toList();
+
+    if (proxyCandidates.isEmpty) {
+      throw const FormatException('هیچ سرور Proxy در Subscription پیدا نشد');
+    }
+
+    String? finalTag;
+    final routeSource = config['route'];
+    final route = routeSource is Map ? Map<String, dynamic>.from(routeSource) : <String, dynamic>{};
+    final configuredFinal = '${route['final'] ?? ''}';
+    if (configuredFinal.isNotEmpty && tags.contains(configuredFinal) && configuredFinal != 'direct') {
+      finalTag = configuredFinal;
+    }
+
+    if (finalTag == null) {
+      for (final outbound in outbounds) {
+        final type = '${outbound['type'] ?? ''}';
+        final tag = '${outbound['tag'] ?? ''}';
+        if ((type == 'selector' || type == 'urltest') && tags.contains(tag)) {
+          finalTag = tag;
+          break;
+        }
+      }
+    }
+
+    if (finalTag == null) {
+      if (proxyCandidates.length == 1) {
+        finalTag = proxyCandidates.first;
+      } else {
+        finalTag = 'proxy';
+        if (!tags.contains(finalTag)) {
+          outbounds.insert(0, {
+            'tag': finalTag,
+            'type': 'selector',
+            'outbounds': proxyCandidates,
+          });
+        }
+      }
+    }
+
+    final inbounds = <Map<String, dynamic>>[];
+    final sourceInbounds = config['inbounds'];
+    if (sourceInbounds is List) {
+      for (final item in sourceInbounds) {
+        if (item is Map) {
+          inbounds.add(Map<String, dynamic>.from(item));
+        }
+      }
+    }
+
+    final hasTun = inbounds.any((i) => '${i['type'] ?? ''}' == 'tun');
+    if (!hasTun) {
+      inbounds.insert(0, {
+        'tag': 'tun',
+        'type': 'tun',
+        'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+        'mtu': 1500,
+        'dns_mode': 'hijack',
+        'stack': 'system',
+        'auto_route': true,
+        'strict_route': true,
+      });
+    } else {
+      for (final inbound in inbounds) {
+        if ('${inbound['type'] ?? ''}' == 'tun') {
+          inbound['auto_route'] = true;
+          inbound['strict_route'] = true;
+          inbound['mtu'] = 1500;
+          inbound['stack'] ??= 'system';
+          inbound['dns_mode'] ??= 'hijack';
+          inbound['address'] ??= ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'];
+        }
+      }
+    }
+
+    final rules = <dynamic>[];
+    final sourceRules = route['rules'];
+    if (sourceRules is List) rules.addAll(sourceRules);
+    final hasDnsHijackRule = rules.any((r) => r is Map && '${r['action'] ?? ''}' == 'hijack-dns');
+    if (!hasDnsHijackRule) {
+      rules.insert(0, {
+        'protocol': 'dns',
+        'action': 'hijack-dns',
+      });
+    }
+
+    route['rules'] = rules;
+    route['final'] = finalTag;
+    route['auto_detect_interface'] = true;
+
+    if (!config.containsKey('dns')) {
+      config['dns'] = {
+        'servers': [
+          {'tag': 'system', 'type': 'local'},
+        ],
+        'rules': [
+          {'action': 'route', 'server': 'system'},
+        ],
+        'strategy': 'prefer_ipv4',
+      };
+    }
+
+    config['inbounds'] = inbounds;
+    config['outbounds'] = outbounds;
+    config['route'] = route;
+    await target.writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+  }
+
   Future<void> connectBestServer() async {
     if (connecting || connected) return;
     if (importedProfile == null) {
@@ -372,7 +527,7 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         connecting = true;
-        status = 'در حال اتصال با سریع‌ترین سرور...';
+        status = 'در حال آماده‌سازی VPN واقعی...';
       });
     }
 
@@ -380,12 +535,21 @@ class _HomePageState extends State<HomePage> {
       final profile = importedProfile!;
       final source = File(profile.typed.path);
       if (!await source.exists()) throw Exception('فایل پروفایل محلی پیدا نشد');
+
       final target = await profileStorage.getUsingConfig();
       await target.parent.create(recursive: true);
       await source.copy(target.path);
+      profileStorage.setUsingConfig(target.parent.path);
       profileStorage.setSelectedProfile(profile.id);
 
+      // Force a system-wide TUN + auto-route configuration even when the
+      // subscription is a native JSON that does not contain an inbound TUN.
+      await _prepareFullDeviceVpnConfig(target);
+
+      if (mounted) setState(() => status = 'در حال درخواست مجوز VPN و راه‌اندازی TUN...');
       await vpn.startVpn();
+
+      await Future<void>.delayed(const Duration(seconds: 2));
       await _waitForNativeGroups();
       await _runNativeUrlTests();
       await _selectFastestNativeOutbound();
@@ -394,7 +558,7 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           connected = true;
           connecting = false;
-          if (activeOutbound == null) status = 'VPN فعال است';
+          if (activeOutbound == null) status = 'VPN فعال است؛ ترافیک دستگاه از TUN عبور می‌کند';
         });
       }
     } catch (e) {
@@ -484,11 +648,13 @@ class _HomePageState extends State<HomePage> {
                 contentPadding: EdgeInsets.zero,
                 title: const Text('اتصال خودکار به سریع‌ترین سرور'),
                 value: autoConnect,
-                onChanged: connected ? null : (value) async {
-                  setState(() => autoConnect = value);
-                  final prefs = await SharedPreferences.getInstance();
-                  await prefs.setBool('auto_connect', value);
-                },
+                onChanged: connected
+                    ? null
+                    : (value) async {
+                        setState(() => autoConnect = value);
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.setBool('auto_connect', value);
+                      },
               ),
               Text(status, textAlign: TextAlign.center),
               const SizedBox(height: 8),
@@ -575,6 +741,7 @@ class _HomePageState extends State<HomePage> {
     refreshTimer?.cancel();
     groupSubscription?.cancel();
     trafficSubscription?.cancel();
+    logSubscription?.cancel();
     urlController.dispose();
     super.dispose();
   }
