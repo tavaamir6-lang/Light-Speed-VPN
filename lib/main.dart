@@ -470,13 +470,11 @@ class _HomePageState extends State<HomePage> {
         'dns_mode': 'hijack',
         'stack': 'system',
         'auto_route': true,
-        'strict_route': true,
       });
     } else {
       for (final inbound in inbounds) {
         if ('${inbound['type'] ?? ''}' == 'tun') {
           inbound['auto_route'] = true;
-          inbound['strict_route'] = true;
           inbound['mtu'] = 1500;
           inbound['stack'] ??= 'system';
           inbound['dns_mode'] ??= 'hijack';
