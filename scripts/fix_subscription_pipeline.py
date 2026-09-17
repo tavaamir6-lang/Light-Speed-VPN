@@ -43,7 +43,6 @@ fixed, count = old_pipeline.subn(new_pipeline, source, count=1)
 if count == 0 and "Future<Profile> _importProfileFromSubscription" not in source:
     raise SystemExit("Could not find the subscription pipeline in lib/main.dart")
 
-# Remove the now-unused manual subscription-userinfo parser if it still exists.
 fixed, _ = re.subn(
     r"  UserInfo\? _parseUserInfo\(String\? header\) \{.*?\n  \}\n\n",
     "",
@@ -52,11 +51,57 @@ fixed, _ = re.subn(
     flags=re.S,
 )
 
-# Android's unprivileged VpnService TUN implementation does not implement
-# sing-box strict_route. auto_route + auto_detect_interface provide the
-# relevant system-wide routing and loop-prevention behavior here.
+# Android VpnService/libbox does not implement strict_route. Use the
+# supported full-device routing path: auto_route + auto_detect_interface.
 fixed = fixed.replace("        'strict_route': true,\n", "")
 fixed = fixed.replace("          inbound['strict_route'] = true;\n", "")
 
+# gVisor is the most compatible TUN stack for Android VPN clients and is
+# commonly used by V2Box/sing-box Android configurations, especially for UDP.
+fixed = fixed.replace("        'stack': 'system',\n", "        'stack': 'gvisor',\n")
+fixed = fixed.replace("          inbound['stack'] ??= 'system';\n", "          inbound['stack'] = 'gvisor';\n")
+
+# Make TUN capture complete application traffic and improve UDP/NAT handling.
+fixed = fixed.replace("        'dns_mode': 'hijack',\n", "        'dns_mode': 'hijack',\n        'sniff': true,\n        'sniff_override_destination': false,\n        'endpoint_independent_nat': true,\n")
+fixed = fixed.replace("          inbound['dns_mode'] ??= 'hijack';\n", "          inbound['dns_mode'] = 'hijack';\n          inbound['sniff'] = true;\n          inbound['sniff_override_destination'] = false;\n          inbound['endpoint_independent_nat'] = true;\n")
+
+# If the subscription has no DNS section, do not depend on Android's local
+# resolver. Route DNS over HTTPS through the selected proxy outbound. This is
+# important on networks where ordinary DNS is blocked or intercepted.
+dns_block = """    if (!config.containsKey('dns')) {
+      config['dns'] = {
+        'servers': [
+          {'tag': 'system', 'type': 'local'},
+        ],
+        'rules': [
+          {'action': 'route', 'server': 'system'},
+        ],
+        'strategy': 'prefer_ipv4',
+      };
+    }
+"""
+dns_replacement = """    if (!config.containsKey('dns')) {
+      config['dns'] = {
+        'servers': [
+          {
+            'tag': 'remote',
+            'type': 'https',
+            'server': '1.1.1.1',
+            'server_port': 443,
+            'path': '/dns-query',
+            'detour': finalTag,
+          },
+        ],
+        'rules': [
+          {'action': 'route', 'server': 'remote'},
+        ],
+        'final': 'remote',
+        'strategy': 'prefer_ipv4',
+      };
+    }
+"""
+if dns_block in fixed:
+    fixed = fixed.replace(dns_block, dns_replacement, 1)
+
 path.write_text(fixed)
-print("Subscription pipeline patched and Android TUN routing aligned with supported options.")
+print("Subscription pipeline patched; Android TUN now uses gVisor, DNS-over-HTTPS via proxy, auto-route and loop prevention.")
